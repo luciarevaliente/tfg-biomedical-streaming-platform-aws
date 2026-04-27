@@ -1,0 +1,11 @@
+# Terraform - no subir a GitHub
+infrastructure/terraform/backend.hcl
+infrastructure/terraform/.terraform/
+infrastructure/terraform/.terraform.lock.hcl
+infrastructure/terraform/terraform.tfstate
+infrastructure/terraform/terraform.tfstate.backup
+infrastructure/terraform/terraform.tfvars
+
+# Python
+__pycache__/
+*.pyc
