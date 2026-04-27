@@ -1,3 +1,5 @@
+# Default values
+
 variable "aws_region" {
   description = "AWS region where resources are deployed"
   type        = string
