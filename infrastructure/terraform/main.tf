@@ -1,6 +1,8 @@
+# Terraform configuration for the biomedical streaming platform on AWS
 terraform {
   required_version = ">= 1.0"
 
+# Define required providers and backend configuration
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -8,6 +10,7 @@ terraform {
     }
   }
 
+# Configure the S3 backend for Terraform state management
   backend "s3" {
     bucket         = "tfg-biomedical-terraform-state"
     key            = "tfg-biomedical/terraform.tfstate"
@@ -17,10 +20,11 @@ terraform {
   }
 }
 
+# Configure the AWS provider
 provider "aws" {
   region = var.aws_region
 }
-
+# Define the biomedical pipeline module
 module "biomedical_pipeline" {
   source = "./modules/biomedical_pipeline"
 
