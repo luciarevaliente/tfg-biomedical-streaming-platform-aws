@@ -1,6 +1,6 @@
 # Lambda function for biomedical data processing
 resource "aws_lambda_function" "biomedical_processor" {
-  filename = "${path.root}/../../../src/lambda/handler.zip"
+  filename         = "C:/Users/User/Enginyeria de dades - UAB/TFG/tfg-biomedical-streaming-platform-aws/src/lambda/handler.zip"
   function_name    = "${var.project_name}-${var.environment}-processor"
   role             = aws_iam_role.lambda_execution_role.arn
   handler          = "handler.lambda_handler"
