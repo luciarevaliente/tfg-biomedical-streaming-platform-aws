@@ -27,10 +27,11 @@ PROJECT_NAME = os.environ['PROJECT_NAME']
 table = dynamodb_resource.Table(DYNAMODB_TABLE)
 
 # Required fields for validation
+# Note: ingest_timestamp is NOT required here — it is added by Lambda upon receipt
 REQUIRED_FIELDS = [
     'subject_id', 'device_id', 'sensor_type',
     'sampling_rate_hz', 'sensor_timestamp',
-    'ingest_timestamp', 'value', 'unit', 'schema_version'
+    'value', 'unit', 'schema_version'
 ]
 
 # CloudWatch batch limit
@@ -56,6 +57,9 @@ def lambda_handler(event, context):
             # Decode event from Kinesis
             raw_data = base64.b64decode(record['kinesis']['data']).decode('utf-8')
             event_data = json.loads(raw_data)
+
+            # Add ingest_timestamp here — reflects the real moment Lambda receives the event
+            event_data['ingest_timestamp'] = time.time()
 
             # Validate required fields
             validate_event(event_data)
