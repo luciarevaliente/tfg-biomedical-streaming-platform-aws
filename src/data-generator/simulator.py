@@ -34,8 +34,8 @@ SCENARIOS = {
                 'subject_id': 'S1',
                 'device_id': 'EmpaticaE4',
                 'sensors': [
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'µS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'ºC'},
+                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
+                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
                 ]
             }
         ]
@@ -51,8 +51,8 @@ SCENARIOS = {
                 'sensors': [
                     {'sensor_type': 'BVP',  'sampling_rate_hz': 64, 'unit': '-'},
                     {'sensor_type': 'ACC',  'sampling_rate_hz': 32, 'unit': '1/64g'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'µS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'ºC'},
+                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
+                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
                 ]
             },
             {
@@ -61,8 +61,8 @@ SCENARIOS = {
                 'sensors': [
                     {'sensor_type': 'BVP',  'sampling_rate_hz': 64, 'unit': '-'},
                     {'sensor_type': 'ACC',  'sampling_rate_hz': 32, 'unit': '1/64g'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'µS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'ºC'},
+                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
+                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
                 ]
             }
         ]
@@ -78,8 +78,8 @@ SCENARIOS = {
                 'sensors': [
                     {'sensor_type': 'BVP',  'sampling_rate_hz': 64, 'unit': '-'},
                     {'sensor_type': 'ACC',  'sampling_rate_hz': 32, 'unit': '1/64g'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'µS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'ºC'},
+                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
+                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
                 ]
             },
             {
@@ -87,9 +87,9 @@ SCENARIOS = {
                 'device_id': 'RespiBAN',
                 'sensors': [
                     {'sensor_type': 'ECG',  'sampling_rate_hz': 700, 'unit': 'mV'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 700, 'unit': 'µS'},
+                    {'sensor_type': 'EDA',  'sampling_rate_hz': 700, 'unit': 'uS'},
                     {'sensor_type': 'EMG',  'sampling_rate_hz': 700, 'unit': 'mV'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 700, 'unit': 'ºC'},
+                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 700, 'unit': 'C'},
                     {'sensor_type': 'RESP', 'sampling_rate_hz': 700, 'unit': '%'},
                     {'sensor_type': 'ACC',  'sampling_rate_hz': 700, 'unit': 'g'},
                 ]
@@ -126,11 +126,12 @@ def generate_value(sensor_type):
     return round(random.uniform(low, high), 4)
 
 
-def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit):
+def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, scenario):
     """Build a raw event record matching the TFG data model.
-    
-    Note: ingest_timestamp is NOT included here: it is added by Lambda
+
+    Note: ingest_timestamp is NOT included here — it is added by Lambda
     at the moment the event is received, so it reflects the real ingestion time.
+    The scenario field allows filtering results per scenario during analysis.
     """
     return {
         'subject_id': subject_id,
@@ -140,6 +141,7 @@ def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit):
         'sensor_timestamp': time.time(),
         'value': generate_value(sensor_type),
         'unit': unit,
+        'scenario': scenario,
         'schema_version': SCHEMA_VERSION
     }
 
@@ -189,7 +191,7 @@ def run_scenario(scenario_name, scenario_config, repetition):
     )
 
     # Track next emission time per sensor
-    # key: (subject_id, sensor_type) → next_emit_time
+    # key: (subject_id, sensor_type) -> next_emit_time
     next_emit = {}
     for subject in subjects:
         for sensor in subject['sensors']:
@@ -215,7 +217,8 @@ def run_scenario(scenario_name, scenario_config, repetition):
                         device_id=subject['device_id'],
                         sensor_type=sensor['sensor_type'],
                         sampling_rate_hz=sensor['sampling_rate_hz'],
-                        unit=sensor['unit']
+                        unit=sensor['unit'],
+                        scenario=scenario_name
                     )
                     batch.append(event)
                     next_emit[key] += interval
@@ -228,7 +231,7 @@ def run_scenario(scenario_name, scenario_config, repetition):
         time.sleep(0.01)
 
     elapsed = time.time() - start_time
-    logger.info(f"  → {total_sent} events sent in {elapsed:.1f}s ({total_sent/elapsed:.1f} ev/s)")
+    logger.info(f"  -> {total_sent} events sent in {elapsed:.1f}s ({total_sent/elapsed:.1f} ev/s)")
     return total_sent
 
 
