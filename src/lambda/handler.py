@@ -49,7 +49,7 @@ def lambda_handler(event, context):
     latencies = []
 
     # Write raw batch to S3
-    write_raw_to_s3(records)
+    write_raw_to_s3(records, context.aws_request_id)
 
     # Process each event
     for record in records:
@@ -127,11 +127,11 @@ def float_to_decimal(obj):
     return obj
 
 
-def write_raw_to_s3(records):
+def write_raw_to_s3(records, request_id):
     """Write raw batch to S3 exactly as received from Kinesis."""
     try:
         timestamp = int(time.time())
-        key = f"raw/{timestamp}.json"
+        key = f"raw/{timestamp}_{request_id}.json"
         body = json.dumps(records)
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
