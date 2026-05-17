@@ -76,7 +76,7 @@ def lambda_handler(event, context):
                 'subject_id_sensor_type': f"{event_data['subject_id']}#{event_data['sensor_type']}",
                 'processed_timestamp': processed_timestamp,
                 'sensor_timestamp': event_data['sensor_timestamp'],
-                'valid': True,
+                # 'valid': True,
                 'pipeline_latency_ms': pipeline_latency_ms
             })
 
