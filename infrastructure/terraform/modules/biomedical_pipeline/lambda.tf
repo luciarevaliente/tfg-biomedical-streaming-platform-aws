@@ -2,7 +2,7 @@
 resource "aws_lambda_function" "biomedical_processor" {
   # filename         = "C:/Users/User/Enginyeria de dades - UAB/TFG/tfg-biomedical-streaming-platform-aws/src/lambda/handler.zip"
   filename         = "${path.module}/../../../../src/lambda/handler.zip" 
-  source_code_hash = filebase64sha256("${path.module}/../../../../src/lambda/handler.zip")  # Compress-Archive -Path handler.py -DestinationPath handler.zip -Force
+  source_code_hash = filebase64sha256("${path.module}/../../../../src/lambda/handler.zip") 
   function_name    = "${var.project_name}-${var.environment}-processor"
   role             = aws_iam_role.lambda_execution_role.arn
   handler          = "handler.lambda_handler"

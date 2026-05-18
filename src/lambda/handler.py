@@ -6,6 +6,8 @@ import boto3
 import logging
 from decimal import Decimal
 
+ # Compress-Archive -Path handler.py -DestinationPath handler.zip -Force
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -46,7 +48,9 @@ def lambda_handler(event, context):
 
     processed_events = []
     failed_events = []
-    latencies = []
+    ingest_latencies = []
+    processing_latencies = []
+    pipeline_latencies = []
 
     # Write raw batch to S3
     write_raw_to_s3(records, context.aws_request_id)
@@ -64,8 +68,15 @@ def lambda_handler(event, context):
             # Validate required fields
             validate_event(event_data)
 
-            # Enrich with processed timestamp and latency
+            # Enrich with processed timestamp and latencies
             processed_timestamp = time.time()
+
+            ingest_latency_ms = int(
+                (event_data['ingest_timestamp'] - event_data['sensor_timestamp']) * 1000
+            )
+            processing_latency_ms = int(
+                (processed_timestamp - event_data['ingest_timestamp']) * 1000
+            )
             pipeline_latency_ms = int(
                 (processed_timestamp - event_data['sensor_timestamp']) * 1000
             )
@@ -76,15 +87,18 @@ def lambda_handler(event, context):
                 'subject_id_sensor_type': f"{event_data['subject_id']}#{event_data['sensor_type']}",
                 'processed_timestamp': processed_timestamp,
                 'sensor_timestamp': event_data['sensor_timestamp'],
-                # 'valid': True,
-                'pipeline_latency_ms': pipeline_latency_ms
+                'ingest_latency_ms': ingest_latency_ms,         # Time from sensor to Lambda
+                'processing_latency_ms': processing_latency_ms, # Time Lambda takes to process
+                'pipeline_latency_ms': pipeline_latency_ms      # Total end-to-end latency: SLO
             })
 
             # Write processed record to DynamoDB
             write_processed_to_dynamodb(processed_record)
 
             processed_events.append(processed_record)
-            latencies.append(pipeline_latency_ms)
+            ingest_latencies.append(ingest_latency_ms)
+            processing_latencies.append(processing_latency_ms)
+            pipeline_latencies.append(pipeline_latency_ms)
 
         except Exception as e:
             logger.error(f"Failed to process record: {e}")
@@ -98,7 +112,9 @@ def lambda_handler(event, context):
     send_metrics(
         total_records=len(records),
         processed_count=len(processed_events),
-        latencies=latencies
+        ingest_latencies=ingest_latencies,
+        processing_latencies=processing_latencies,
+        pipeline_latencies=pipeline_latencies
     )
 
     logger.info(f"Processed: {len(processed_events)}, Failed: {len(failed_events)}")
@@ -166,7 +182,7 @@ def send_to_dlq(failed_events):
             logger.error(f"Failed to send event to DLQ: {e}")
 
 
-def send_metrics(total_records, processed_count, latencies):
+def send_metrics(total_records, processed_count, ingest_latencies, processing_latencies, pipeline_latencies):
     """Send custom metrics to CloudWatch in batches of max 1000."""
     try:
         metrics = [
@@ -187,7 +203,20 @@ def send_metrics(total_records, processed_count, latencies):
             }
         ]
 
-        for latency in latencies:
+        # Latencies in pipeline order: ingest → processing → pipeline
+        for latency in ingest_latencies:
+            metrics.append({
+                'MetricName': 'IngestLatencyMs',
+                'Value': latency,
+                'Unit': 'Milliseconds'
+            })
+        for latency in processing_latencies:
+            metrics.append({
+                'MetricName': 'ProcessingLatencyMs',
+                'Value': latency,
+                'Unit': 'Milliseconds'
+            })
+        for latency in pipeline_latencies:
             metrics.append({
                 'MetricName': 'PipelineLatencyMs',
                 'Value': latency,
