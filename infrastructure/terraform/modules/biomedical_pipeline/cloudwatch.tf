@@ -2,7 +2,6 @@
 resource "aws_cloudwatch_log_group" "lambda_logs" {
   name              = "/aws/lambda/${aws_lambda_function.biomedical_processor.function_name}"
   retention_in_days = 7
-
   tags = {
     Project     = var.project_name
     Environment = var.environment
@@ -20,11 +19,9 @@ resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
   statistic           = "Sum"
   threshold           = 0
   alarm_description   = "Lambda function errors detected - pipeline may be failing"
-
   dimensions = {
     FunctionName = aws_lambda_function.biomedical_processor.function_name
   }
-
   tags = {
     Project     = var.project_name
     Environment = var.environment
@@ -42,11 +39,9 @@ resource "aws_cloudwatch_metric_alarm" "kinesis_iterator_age" {
   statistic           = "Maximum"
   threshold           = 10000
   alarm_description   = "Kinesis iterator age exceeds 10 seconds - SLO P95 < 10s at risk"
-
   dimensions = {
     StreamName = aws_kinesis_stream.biomedical_stream.name
   }
-
   tags = {
     Project     = var.project_name
     Environment = var.environment
@@ -64,31 +59,32 @@ resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
   statistic           = "Sum"
   threshold           = 0
   alarm_description   = "Failed events detected in DLQ - data integrity at risk"
-
   dimensions = {
     QueueName = aws_sqs_queue.dlq.name
   }
-
   tags = {
     Project     = var.project_name
     Environment = var.environment
   }
 }
 
-# Custom metrics namespace for pipeline performance
+# Dashboard with pipeline performance metrics
 resource "aws_cloudwatch_dashboard" "pipeline_dashboard" {
   dashboard_name = "${var.project_name}-${var.environment}-dashboard"
-
   dashboard_body = jsonencode({
     widgets = [
       {
         type = "metric"
         properties = {
-          title   = "Pipeline Latency (ms)"
+          title   = "Latency Breakdown (ms)"
           region  = var.aws_region
           period  = 60
           stat    = "p95"
-          metrics = [["BiomedicalPipeline", "PipelineLatencyMs"]]
+          metrics = [
+            ["BiomedicalPipeline", "IngestLatencyMs"],
+            ["BiomedicalPipeline", "ProcessingLatencyMs"],
+            ["BiomedicalPipeline", "PipelineLatencyMs"]
+          ]
         }
       },
       {
