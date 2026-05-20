@@ -25,4 +25,4 @@ response = kinesis.put_record(
 print(f"Enviat! ShardId: {response['ShardId']}, SequenceNumber: {response['SequenceNumber']}")
 print(f"sensor_timestamp: {event['sensor_timestamp']}")
 print(f"subject_id_sensor_type: S1#EDA")
-print("Espera ~30s i comprova S3 i DynamoDB")
+# print("Espera ~30s i comprova S3 i DynamoDB")
