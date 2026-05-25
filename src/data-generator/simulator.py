@@ -126,7 +126,7 @@ def generate_value(sensor_type):
     return round(random.uniform(low, high), 4)
 
 
-def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, scenario):
+def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, scenario, run_id):
     """Build a raw event record matching the TFG data model.
 
     Note: ingest_timestamp is NOT included here — it is added by Lambda
@@ -142,6 +142,7 @@ def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, s
         'value': generate_value(sensor_type),
         'unit': unit,
         'scenario': scenario,
+        'run_id': run_id,
         'schema_version': SCHEMA_VERSION
     }
 
@@ -218,7 +219,8 @@ def run_scenario(scenario_name, scenario_config, repetition):
                         sensor_type=sensor['sensor_type'],
                         sampling_rate_hz=sensor['sampling_rate_hz'],
                         unit=sensor['unit'],
-                        scenario=scenario_name
+                        scenario=scenario_name,
+                        run_id=repetition
                     )
                     batch.append(event)
                     next_emit[key] += interval
