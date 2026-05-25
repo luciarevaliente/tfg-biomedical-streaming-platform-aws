@@ -1,6 +1,7 @@
 # S3 bucket for raw biomedical data
 resource "aws_s3_bucket" "raw_data" {
-  bucket = "${var.project_name}-${var.environment}-raw-data"
+  bucket        = "${var.project_name}-${var.environment}-raw-data"
+  force_destroy = true
 
   tags = {
     Project     = var.project_name
@@ -10,8 +11,8 @@ resource "aws_s3_bucket" "raw_data" {
 
 # Enable versioning for raw data bucket
 resource "aws_s3_bucket_versioning" "raw_data_versioning" {
-  bucket        = aws_s3_bucket.raw_data.id
-  force_destroy = true
+  bucket = aws_s3_bucket.raw_data.id
+
 
   versioning_configuration {
     status = "Enabled"
