@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 
 src/analysis/results2/
+experiments/
