@@ -1,0 +1,4 @@
+scenario,run_id,n_records,pipeline_latency_ms_p50,pipeline_latency_ms_p95,pipeline_latency_ms_p99,pipeline_latency_ms_mean,ingest_latency_ms_p50,ingest_latency_ms_p95,ingest_latency_ms_p99,ingest_latency_ms_mean,processing_latency_ms_p50,processing_latency_ms_p95,processing_latency_ms_p99,processing_latency_ms_mean
+base,1,2348,-275,166,314,-227,-275,166,314,-227,0,0,0,0
+base,2,2302,-274,161,329,-220,-274,161,329,-220,0,0,0,0
+base,3,2266,-290,85,184,-317,-290,85,184,-317,0,0,0,0

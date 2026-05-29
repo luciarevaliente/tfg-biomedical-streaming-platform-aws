@@ -4,22 +4,24 @@ TFG: Arquitectura cloud distribuïda per al processament de dades biomèdiques
 Lucía Revaliente Torres — UAB 2026
 
 Execució:
-    python analysis.py
+    python analysis.py --scenario base
+    python analysis.py --scenario sustained
+    python analysis.py --scenario peak
 
 Prerequisits:
     pip install boto3 pandas matplotlib numpy
     AWS credentials configurades (mateix perfil que el simulador)
 
-Output:
-    results/summary.csv            — taula resum per escenari i run_id
-    results/slo_report.csv         — criteris de superació per escenari
-    results/integrity.csv          — integritat de dades per escenari
-    results/throughput.csv         — throughput real vs teòric per escenari
-    results/fig1_boxplot.png       — boxplot de les tres latències per escenari
-    results/fig2_stacked.png       — barres apilades normalitzades ingest vs processing
-    results/fig3_integrity.png     — IngestedEvents vs StoredEvents per escenari
-    results/fig4_peak_timeline.png — evolució temporal de latència durant el peak
-    results/fig5_throughput.png    — throughput real vs teòric per escenari
+Output (a la carpeta results_<scenario>/):
+    summary.csv            — taula resum per escenari i run_id
+    slo_report.csv         — criteris de superació per escenari
+    integrity.csv          — integritat de dades per escenari
+    throughput.csv         — throughput real vs teòric per escenari
+    fig1_boxplot.png       — boxplot de les tres latències per escenari
+    fig2_stacked.png       — barres apilades normalitzades ingest vs processing
+    fig3_integrity.png     — IngestedEvents vs StoredEvents per escenari
+    fig4_peak_timeline.png — evolució temporal de latència durant el peak
+    fig5_throughput.png    — throughput real vs teòric per escenari
 """
 
 import boto3
@@ -42,25 +44,20 @@ DYNAMODB_TABLE = 'tfg-biomedical-dev-processed-data'
 CLOUDWATCH_NAMESPACE = 'BiomedicalPipeline'
 PROJECT_NAME = 'tfg-biomedical-dev'
 
-# Theoretical event rates from TFG Annex 4 (ev/s)
 THEORETICAL_RATES = {
     'base': 8,
     'sustained': 208,
     'peak': 4304
 }
 
-# Scenario durations in seconds (per repetition)
 SCENARIO_DURATIONS = {
     'base': 300,
     'sustained': 300,
     'peak': 30
 }
 
-# SLO thresholds in milliseconds
-SLO_PRIMARY_MS = 10_000    # P95 < 10s for base and sustained
-SLO_PEAK_MS    = 30_000    # P95 < 30s for peak (observational)
-
-OUTPUT_DIR = 'results'
+SLO_PRIMARY_MS = 10_000
+SLO_PEAK_MS    = 30_000
 
 # ─────────────────────────────────────────────
 # LOGGING
@@ -76,9 +73,9 @@ logger = logging.getLogger()
 # AWS CLIENTS
 # ─────────────────────────────────────────────
 
-dynamodb    = boto3.resource('dynamodb', region_name=REGION)
-cloudwatch  = boto3.client('cloudwatch',  region_name=REGION)
-sqs         = boto3.client('sqs',         region_name=REGION)
+dynamodb   = boto3.resource('dynamodb', region_name=REGION)
+cloudwatch = boto3.client('cloudwatch', region_name=REGION)
+sqs        = boto3.client('sqs',        region_name=REGION)
 
 table = dynamodb.Table(DYNAMODB_TABLE)
 
@@ -100,7 +97,6 @@ def query_dynamodb():
 
     logger.info(f"  {len(items)} records retrieved from DynamoDB")
 
-    # Convert Decimal to float for analysis
     def dec_to_float(obj):
         if isinstance(obj, Decimal):
             return float(obj)
@@ -113,13 +109,11 @@ def query_dynamodb():
     items = [dec_to_float(item) for item in items]
     df = pd.DataFrame(items)
 
-    # Ensure numeric types for latency and timestamp columns
     for col in ['pipeline_latency_ms', 'ingest_latency_ms', 'processing_latency_ms',
                 'sensor_timestamp', 'ingest_timestamp', 'processed_timestamp']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # run_id is always an integer (1, 2 or 3) — stored as Number in DynamoDB
     if 'run_id' in df.columns:
         df['run_id'] = df['run_id'].astype(int)
 
@@ -131,11 +125,10 @@ def query_dynamodb():
 
 
 # ─────────────────────────────────────────────
-# STEP 2 — LATENCY METRICS (P50, P95, P99)
+# STEP 2 — LATENCY METRICS
 # ─────────────────────────────────────────────
 
 def compute_latency_metrics(df):
-    """Compute P50, P95, P99 for the three latency metrics, grouped by scenario and run_id."""
     logger.info("Computing latency metrics...")
 
     group_cols   = ['scenario', 'run_id'] if 'run_id' in df.columns else ['scenario']
@@ -157,7 +150,6 @@ def compute_latency_metrics(df):
         records.append(row)
 
     metrics_df = pd.DataFrame(records)
-
     scenario_order = ['base', 'sustained', 'peak']
     metrics_df['scenario'] = pd.Categorical(
         metrics_df['scenario'], categories=scenario_order, ordered=True
@@ -173,53 +165,35 @@ def compute_latency_metrics(df):
 # STEP 3 — DATA INTEGRITY
 # ─────────────────────────────────────────────
 
-def compute_integrity(df):
-    """Count records per scenario in DynamoDB and query CloudWatch for totals."""
+def compute_integrity(df, scenario):
     logger.info("Computing data integrity...")
 
-    # Records stored in DynamoDB per scenario
-    stored = df.groupby('scenario').size().reset_index(name='stored_events')
+    stored_count = len(df)
+    expected     = THEORETICAL_RATES[scenario] * SCENARIO_DURATIONS[scenario] * 3
+    loss_rate    = max(0, (expected - stored_count) / expected * 100) if expected > 0 else 0
 
-    # Total IngestedEvents and StoredEvents from CloudWatch (whole day)
-    now        = datetime.now(timezone.utc)
-    start_time = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
+    # Read actual sent events from simulator output file if available.
+    # Falls back to theoretical rate if file not found.
+    import json as _json
+    sent_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data-generator', f'sent_events_{scenario}.json')
+    if os.path.exists(sent_file):
+        with open(sent_file) as f:
+            sent_data = _json.load(f)
+        expected = sent_data['events_sent']
+        logger.info(f"  Expected events from simulator: {expected}")
+    else:
+        expected = THEORETICAL_RATES[scenario] * SCENARIO_DURATIONS[scenario] * 3
+        logger.warning(f"  sent_events_{scenario}.json not found in data-generator/, using theoretical: {expected}")
 
-    cw_totals = {}
-    for metric in ['IngestedEvents', 'StoredEvents']:
-        try:
-            response = cloudwatch.get_metric_statistics(
-                Namespace=CLOUDWATCH_NAMESPACE,
-                MetricName=metric,
-                StartTime=start_time,
-                EndTime=now,
-                Period=86400,
-                Statistics=['Sum']
-            )
-            total = sum(dp['Sum'] for dp in response['Datapoints'])
-            cw_totals[metric] = int(total)
-            logger.info(f"  CloudWatch {metric}: {int(total)}")
-        except Exception as e:
-            logger.warning(f"  Could not retrieve {metric} from CloudWatch: {e}")
-            cw_totals[metric] = None
+    loss_rate = max(0, (expected - stored_count) / expected * 100) if expected > 0 else 0
 
-    # Compute loss rate per scenario using theoretical expected counts
-    integrity_rows = []
-    for _, row in stored.iterrows():
-        scenario     = row['scenario']
-        stored_count = row['stored_events']
-        expected     = THEORETICAL_RATES[scenario] * SCENARIO_DURATIONS[scenario] * 3
-        loss_rate    = max(0, (expected - stored_count) / expected * 100) if expected > 0 else 0
-        integrity_rows.append({
-            'scenario':        scenario,
-            'expected_events': expected,
-            'stored_events':   stored_count,
-            'loss_rate_pct':   round(loss_rate, 3),
-            'slo_met':         loss_rate < 1.0
-        })
-
-    integrity_df = pd.DataFrame(integrity_rows)
-    integrity_df['cw_total_ingested'] = cw_totals.get('IngestedEvents')
-    integrity_df['cw_total_stored']   = cw_totals.get('StoredEvents')
+    integrity_df = pd.DataFrame([{
+        'scenario':        scenario,
+        'expected_events': expected,
+        'stored_events':   stored_count,
+        'loss_rate_pct':   round(loss_rate, 3),
+        'slo_met':         loss_rate < 1.0
+    }])
 
     logger.info("  Integrity computed")
     return integrity_df
@@ -230,7 +204,6 @@ def compute_integrity(df):
 # ─────────────────────────────────────────────
 
 def check_dlq():
-    """Check approximate number of messages in the DLQ."""
     logger.info("Checking DLQ...")
     try:
         queues   = sqs.list_queues(QueueNamePrefix=PROJECT_NAME)
@@ -254,8 +227,7 @@ def check_dlq():
 # STEP 5 — SLO REPORT
 # ─────────────────────────────────────────────
 
-def compute_slo_report(metrics_df):
-    """Evaluate SLO compliance per scenario (worst P95 across repetitions)."""
+def compute_slo_report(metrics_df, scenario):
     logger.info("Evaluating SLO compliance...")
 
     agg = metrics_df.groupby('scenario')['pipeline_latency_ms_p95'].max().reset_index()
@@ -263,16 +235,16 @@ def compute_slo_report(metrics_df):
 
     rows = []
     for _, row in agg.iterrows():
-        scenario  = row['scenario']
+        s         = row['scenario']
         p95       = row['p95_pipeline_ms']
-        threshold = SLO_PRIMARY_MS if scenario in ('base', 'sustained') else SLO_PEAK_MS
-        criterion = 'P95 < 10.000 ms' if scenario in ('base', 'sustained') else 'P95 < 30.000 ms (observacional)'
+        threshold = SLO_PRIMARY_MS if s in ('base', 'sustained') else SLO_PEAK_MS
+        criterion = 'P95 < 10.000 ms' if s in ('base', 'sustained') else 'P95 < 30.000 ms (observacional)'
         rows.append({
-            'scenario':       scenario,
+            'scenario':        s,
             'p95_pipeline_ms': int(p95),
-            'threshold_ms':   threshold,
-            'criterion':      criterion,
-            'slo_met':        p95 < threshold
+            'threshold_ms':    threshold,
+            'criterion':       criterion,
+            'slo_met':         p95 < threshold
         })
 
     slo_df = pd.DataFrame(rows)
@@ -285,13 +257,12 @@ def compute_slo_report(metrics_df):
 # ─────────────────────────────────────────────
 
 def compute_throughput(integrity_df):
-    """Compute real throughput (events/s) vs theoretical per scenario."""
     logger.info("Computing throughput...")
     rows = []
     for _, row in integrity_df.iterrows():
         scenario       = row['scenario']
         stored         = row['stored_events']
-        duration_total = SCENARIO_DURATIONS[scenario] * 3   # 3 repetitions
+        duration_total = SCENARIO_DURATIONS[scenario] * 3
         real_rate      = round(stored / duration_total, 1) if duration_total > 0 else 0
         rows.append({
             'scenario':        scenario,
@@ -308,7 +279,6 @@ def compute_throughput(integrity_df):
 # SHARED PLOT CONSTANTS
 # ─────────────────────────────────────────────
 
-SCENARIO_ORDER  = ['base', 'sustained', 'peak']
 SCENARIO_COLORS = {'base': '#4C72B0', 'sustained': '#DD8452', 'peak': '#C44E52'}
 SCENARIO_LABELS = {
     'base':      'Base\n(~8 ev/s)',
@@ -318,11 +288,10 @@ SCENARIO_LABELS = {
 
 
 # ─────────────────────────────────────────────
-# FIGURE 1 — Boxplot de les tres latències
+# FIGURE 1 — Boxplot
 # ─────────────────────────────────────────────
 
-def fig1_boxplot(df, output_dir):
-    """Boxplot of ingest / processing / pipeline latency grouped by scenario."""
+def fig1_boxplot(df, scenario, output_dir):
     logger.info("Generating Figure 1 — Boxplot latències...")
 
     latency_cols = {
@@ -332,10 +301,10 @@ def fig1_boxplot(df, output_dir):
     }
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 6), sharey=False)
-    fig.suptitle('Distribució de latències per escenari', fontsize=13)
+    fig.suptitle(f'Distribució de latències — Escenari {scenario}', fontsize=13)
 
     for ax, (col, label) in zip(axes, latency_cols.items()):
-        data = [df[df['scenario'] == s][col].dropna().values for s in SCENARIO_ORDER]
+        data = [df[col].dropna().values]
         bp   = ax.boxplot(
             data, patch_artist=True,
             medianprops=dict(color='black', linewidth=2),
@@ -343,18 +312,19 @@ def fig1_boxplot(df, output_dir):
             capprops=dict(linewidth=1.2),
             flierprops=dict(marker='o', markersize=2, alpha=0.4)
         )
-        for patch, scenario in zip(bp['boxes'], SCENARIO_ORDER):
+        for patch in bp['boxes']:
             patch.set_facecolor(SCENARIO_COLORS[scenario])
             patch.set_alpha(0.75)
 
         if col == 'pipeline_latency_ms':
-            ax.axhline(y=SLO_PRIMARY_MS, color='red', linestyle='--',
-                       linewidth=1.5, label=f'SLO P95 < {SLO_PRIMARY_MS // 1000}s')
+            threshold = SLO_PRIMARY_MS if scenario in ('base', 'sustained') else SLO_PEAK_MS
+            ax.axhline(y=threshold, color='red', linestyle='--',
+                       linewidth=1.5, label=f'SLO P95 < {threshold // 1000}s')
             ax.legend(fontsize=8)
 
         ax.set_title(label, fontsize=11)
-        ax.set_xticks(range(1, len(SCENARIO_ORDER) + 1))
-        ax.set_xticklabels([SCENARIO_LABELS[s] for s in SCENARIO_ORDER], fontsize=8)
+        ax.set_xticks([1])
+        ax.set_xticklabels([SCENARIO_LABELS[scenario]], fontsize=9)
         ax.set_ylabel('Latència (ms)', fontsize=9)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
         ax.grid(axis='y', linestyle='--', alpha=0.4)
@@ -367,45 +337,38 @@ def fig1_boxplot(df, output_dir):
 
 
 # ─────────────────────────────────────────────
-# FIGURE 2 — Barres apilades normalitzades
+# FIGURE 2 — Barres apilades
 # ─────────────────────────────────────────────
 
-def fig2_stacked(metrics_df, output_dir):
-    """Normalized stacked bar chart: ingest vs processing share of P95 per scenario."""
+def fig2_stacked(metrics_df, scenario, output_dir):
     logger.info("Generating Figure 2 — Barres apilades normalitzades...")
 
     agg = metrics_df.groupby('scenario').agg(
-        ingest_p95=('ingest_latency_ms_p95',     'mean'),
+        ingest_p95=('ingest_latency_ms_p95', 'mean'),
         processing_p95=('processing_latency_ms_p95', 'mean')
     ).reset_index()
 
-    agg['scenario'] = pd.Categorical(agg['scenario'], categories=SCENARIO_ORDER, ordered=True)
-    agg = agg.sort_values('scenario')
+    total          = agg['ingest_p95'].values[0] + agg['processing_p95'].values[0]
+    ingest_pct     = agg['ingest_p95'].values[0]     / total * 100 if total > 0 else 0
+    processing_pct = agg['processing_p95'].values[0] / total * 100 if total > 0 else 0
 
-    totals         = agg['ingest_p95'] + agg['processing_p95']
-    ingest_pct     = agg['ingest_p95']     / totals * 100
-    processing_pct = agg['processing_p95'] / totals * 100
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    x = range(len(SCENARIO_ORDER))
-
-    ax.bar(x, ingest_pct,     label='Latència ingestió',      color='#4C72B0', alpha=0.85)
-    ax.bar(x, processing_pct, bottom=ingest_pct,
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.bar([0], [ingest_pct],     label='Latència ingestió',      color='#4C72B0', alpha=0.85)
+    ax.bar([0], [processing_pct], bottom=[ingest_pct],
            label='Latència processament', color='#DD8452', alpha=0.85)
 
-    for i, (v1, v2) in enumerate(zip(ingest_pct, processing_pct)):
-        if v1 > 5:
-            ax.text(i, v1 / 2,       f'{v1:.1f}%', ha='center', va='center',
-                    fontsize=9, color='white', fontweight='bold')
-        if v2 > 5:
-            ax.text(i, v1 + v2 / 2,  f'{v2:.1f}%', ha='center', va='center',
-                    fontsize=9, color='white', fontweight='bold')
+    if ingest_pct > 5:
+        ax.text(0, ingest_pct / 2, f'{ingest_pct:.1f}%',
+                ha='center', va='center', fontsize=11, color='white', fontweight='bold')
+    if processing_pct > 5:
+        ax.text(0, ingest_pct + processing_pct / 2, f'{processing_pct:.1f}%',
+                ha='center', va='center', fontsize=11, color='white', fontweight='bold')
 
-    ax.set_xticks(list(x))
-    ax.set_xticklabels([SCENARIO_LABELS[s] for s in SCENARIO_ORDER], fontsize=9)
+    ax.set_xticks([0])
+    ax.set_xticklabels([SCENARIO_LABELS[scenario]], fontsize=10)
     ax.set_ylabel('Proporció (%)', fontsize=10)
     ax.set_ylim(0, 100)
-    ax.set_title('Desglose de latència P95: ingestió vs processament (normalitzat)', fontsize=11)
+    ax.set_title(f'Desglose latència P95 — Escenari {scenario}', fontsize=11)
     ax.legend(fontsize=9)
     ax.grid(axis='y', linestyle='--', alpha=0.4)
 
@@ -417,38 +380,30 @@ def fig2_stacked(metrics_df, output_dir):
 
 
 # ─────────────────────────────────────────────
-# FIGURE 3 — Integritat de dades
+# FIGURE 3 — Integritat
 # ─────────────────────────────────────────────
 
 def fig3_integrity(integrity_df, output_dir):
-    """Bar chart: expected vs stored events per scenario."""
     logger.info("Generating Figure 3 — Integritat de dades...")
 
-    integrity_df = integrity_df.copy()
-    integrity_df['scenario'] = pd.Categorical(
-        integrity_df['scenario'], categories=SCENARIO_ORDER, ordered=True
-    )
-    integrity_df = integrity_df.sort_values('scenario').reset_index(drop=True)
-
-    x     = np.arange(len(SCENARIO_ORDER))
+    row   = integrity_df.iloc[0]
+    fig, ax = plt.subplots(figsize=(6, 5))
     width = 0.35
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.bar(x - width / 2, integrity_df['expected_events'], width,
-           label='Events esperats (teòric)',       color='#4C72B0', alpha=0.7)
-    ax.bar(x + width / 2, integrity_df['stored_events'],   width,
-           label='Events emmagatzemats (real)',    color='#55A868', alpha=0.85)
+    ax.bar([-width/2], [row['expected_events']], width,
+           label='Events esperats (teòric)', color='#4C72B0', alpha=0.7)
+    ax.bar([width/2],  [row['stored_events']],  width,
+           label='Events emmagatzemats (real)', color='#55A868', alpha=0.85)
 
-    for i, row in integrity_df.iterrows():
-        color = 'green' if row['slo_met'] else 'red'
-        ax.text(i, max(row['expected_events'], row['stored_events']) * 1.02,
-                f"Pèrdua: {row['loss_rate_pct']}%",
-                ha='center', va='bottom', fontsize=8, color=color, fontweight='bold')
+    color = 'green' if row['slo_met'] else 'red'
+    ax.text(0, max(row['expected_events'], row['stored_events']) * 1.02,
+            f"Pèrdua: {row['loss_rate_pct']}%",
+            ha='center', va='bottom', fontsize=9, color=color, fontweight='bold')
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([SCENARIO_LABELS[s] for s in SCENARIO_ORDER], fontsize=9)
+    ax.set_xticks([0])
+    ax.set_xticklabels([SCENARIO_LABELS[row['scenario']]], fontsize=10)
     ax.set_ylabel("Nombre d'events", fontsize=10)
-    ax.set_title('Integritat de dades: events esperats vs emmagatzemats', fontsize=11)
+    ax.set_title(f"Integritat de dades — Escenari {row['scenario']}", fontsize=11)
     ax.legend(fontsize=9)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
     ax.grid(axis='y', linestyle='--', alpha=0.4)
@@ -464,29 +419,27 @@ def fig3_integrity(integrity_df, output_dir):
 # FIGURE 4 — Evolució temporal peak
 # ─────────────────────────────────────────────
 
-def fig4_peak_timeline(df, output_dir):
-    """Temporal evolution of P95 pipeline_latency_ms during the peak scenario."""
+def fig4_peak_timeline(df, scenario, output_dir):
     logger.info("Generating Figure 4 — Evolució temporal peak...")
 
-    peak_df = df[df['scenario'] == 'peak'].copy()
-    if peak_df.empty:
+    if scenario != 'peak':
+        logger.info("  Not peak scenario, skipping Figure 4")
+        return
+
+    if df.empty:
         logger.warning("  No peak data found, skipping Figure 4")
         return
 
     fig, ax = plt.subplots(figsize=(12, 5))
     colors_rep = ['#4C72B0', '#DD8452', '#C44E52']
 
-    run_ids = sorted(peak_df['run_id'].unique()) if 'run_id' in peak_df.columns else [None]
+    run_ids = sorted(df['run_id'].unique()) if 'run_id' in df.columns else [None]
 
     for i, run in enumerate(run_ids):
-        subset = peak_df[peak_df['run_id'] == run].copy() if run is not None else peak_df.copy()
+        subset = df[df['run_id'] == run].copy() if run is not None else df.copy()
         subset = subset.sort_values('sensor_timestamp')
-
-        # Normalize timestamp to 0 within each repetition independently
         t0 = subset['sensor_timestamp'].min()
         subset['t_rel'] = subset['sensor_timestamp'] - t0
-
-        # Bin into 1-second intervals
         subset['t_bin'] = subset['t_rel'].apply(lambda x: int(x))
         binned = subset.groupby('t_bin')['pipeline_latency_ms'].quantile(0.95).reset_index()
 
@@ -515,37 +468,29 @@ def fig4_peak_timeline(df, output_dir):
 
 
 # ─────────────────────────────────────────────
-# FIGURE 5 — Throughput real vs teòric
+# FIGURE 5 — Throughput
 # ─────────────────────────────────────────────
 
 def fig5_throughput(throughput_df, output_dir):
-    """Bar chart: real vs theoretical throughput per scenario (log scale)."""
     logger.info("Generating Figure 5 — Throughput real vs teòric...")
 
-    throughput_df = throughput_df.copy()
-    throughput_df['scenario'] = pd.Categorical(
-        throughput_df['scenario'], categories=SCENARIO_ORDER, ordered=True
-    )
-    throughput_df = throughput_df.sort_values('scenario').reset_index(drop=True)
-
-    x     = np.arange(len(SCENARIO_ORDER))
+    row   = throughput_df.iloc[0]
+    fig, ax = plt.subplots(figsize=(6, 5))
     width = 0.35
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.bar(x - width / 2, throughput_df['theoretical_evs'], width,
-           label='Taxa teòrica (ev/s)',        color='#4C72B0', alpha=0.7)
-    ax.bar(x + width / 2, throughput_df['real_evs'],        width,
+    ax.bar([-width/2], [row['theoretical_evs']], width,
+           label='Taxa teòrica (ev/s)', color='#4C72B0', alpha=0.7)
+    ax.bar([width/2],  [row['real_evs']],        width,
            label='Taxa real processada (ev/s)', color='#55A868', alpha=0.85)
 
-    for i, row in throughput_df.iterrows():
-        ax.text(i + width / 2, row['real_evs'] * 1.05,
-                f"{row['efficiency_pct']}%",
-                ha='center', va='bottom', fontsize=9, fontweight='bold', color='#333333')
+    ax.text(width/2, row['real_evs'] * 1.05,
+            f"{row['efficiency_pct']}%",
+            ha='center', va='bottom', fontsize=10, fontweight='bold', color='#333333')
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([SCENARIO_LABELS[s] for s in SCENARIO_ORDER], fontsize=9)
+    ax.set_xticks([0])
+    ax.set_xticklabels([SCENARIO_LABELS[row['scenario']]], fontsize=10)
     ax.set_ylabel('Events per segon (ev/s)', fontsize=10)
-    ax.set_title('Throughput real vs teòric per escenari', fontsize=11)
+    ax.set_title(f"Throughput real vs teòric — Escenari {row['scenario']}", fontsize=11)
     ax.legend(fontsize=9)
     ax.set_yscale('log')
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
@@ -563,9 +508,7 @@ def fig5_throughput(throughput_df, output_dir):
 # ─────────────────────────────────────────────
 
 def export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, output_dir):
-    """Export all results to CSV and print summary to console."""
-
-    metrics_df.to_csv(   os.path.join(output_dir, 'summary.csv'),    index=False)
+    metrics_df.to_csv(    os.path.join(output_dir, 'summary.csv'),    index=False)
     slo_df.to_csv(        os.path.join(output_dir, 'slo_report.csv'), index=False)
     integrity_df.to_csv(  os.path.join(output_dir, 'integrity.csv'),  index=False)
     throughput_df.to_csv( os.path.join(output_dir, 'throughput.csv'), index=False)
@@ -574,7 +517,7 @@ def export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, o
     print("RESUM RESULTATS EXPERIMENTALS — TFG Lucía Revaliente Torres")
     print("=" * 65)
 
-    print("\n── LATÈNCIA P95 pipeline_latency_ms per escenari ──")
+    print("\n── LATÈNCIA P95 pipeline_latency_ms ──")
     agg = metrics_df.groupby('scenario')['pipeline_latency_ms_p95'].max().reset_index()
     for _, row in agg.iterrows():
         print(f"  {row['scenario']:12s}  P95 = {int(row['pipeline_latency_ms_p95']):>8,} ms")
@@ -613,276 +556,55 @@ def export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, o
 # MAIN
 # ─────────────────────────────────────────────
 
-import json
-import time
-import boto3
-import logging
-import random
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger()
-
-# AWS client
-kinesis_client = boto3.client('kinesis', region_name='eu-west-1')
-
-# Kinesis stream name
-STREAM_NAME = 'tfg-biomedical-dev-stream'
-
-# Schema version
-SCHEMA_VERSION = '1.0'
-
-# ─────────────────────────────────────────────
-# SCENARIO DEFINITIONS (from TFG Annex 4)
-# ─────────────────────────────────────────────
-
-SCENARIOS = {
-    'base': {
-        'description': 'Base scenario — 1 subject, Empatica E4 (EDA + TEMP)',
-        'duration_s': 300,       # 5 minutes
-        'repetitions': 3,
-        'subjects': [
-            {
-                'subject_id': 'S1',
-                'device_id': 'EmpaticaE4',
-                'sensors': [
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
-                ]
-            }
-        ]
-    },
-    'sustained': {
-        'description': 'Sustained load scenario — 2 subjects, full Empatica E4',
-        'duration_s': 300,       # 5 minutes
-        'repetitions': 3,
-        'subjects': [
-            {
-                'subject_id': 'S1',
-                'device_id': 'EmpaticaE4',
-                'sensors': [
-                    {'sensor_type': 'BVP',  'sampling_rate_hz': 64, 'unit': '-'},
-                    {'sensor_type': 'ACC',  'sampling_rate_hz': 32, 'unit': '1/64g'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
-                ]
-            },
-            {
-                'subject_id': 'S2',
-                'device_id': 'EmpaticaE4',
-                'sensors': [
-                    {'sensor_type': 'BVP',  'sampling_rate_hz': 64, 'unit': '-'},
-                    {'sensor_type': 'ACC',  'sampling_rate_hz': 32, 'unit': '1/64g'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
-                ]
-            }
-        ]
-    },
-    'peak': {
-        'description': 'Peak scenario — simultaneous Empatica E4 + RespiBAN',
-        'duration_s': 30,        # 30 seconds
-        'repetitions': 3,
-        'subjects': [
-            {
-                'subject_id': 'S1',
-                'device_id': 'EmpaticaE4',
-                'sensors': [
-                    {'sensor_type': 'BVP',  'sampling_rate_hz': 64, 'unit': '-'},
-                    {'sensor_type': 'ACC',  'sampling_rate_hz': 32, 'unit': '1/64g'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 4,  'unit': 'uS'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 4,  'unit': 'C'},
-                ]
-            },
-            {
-                'subject_id': 'S2',
-                'device_id': 'RespiBAN',
-                'sensors': [
-                    {'sensor_type': 'ECG',  'sampling_rate_hz': 700, 'unit': 'mV'},
-                    {'sensor_type': 'EDA',  'sampling_rate_hz': 700, 'unit': 'uS'},
-                    {'sensor_type': 'EMG',  'sampling_rate_hz': 700, 'unit': 'mV'},
-                    {'sensor_type': 'TEMP', 'sampling_rate_hz': 700, 'unit': 'C'},
-                    {'sensor_type': 'RESP', 'sampling_rate_hz': 700, 'unit': '%'},
-                    {'sensor_type': 'ACC',  'sampling_rate_hz': 700, 'unit': 'g'},
-                ]
-            }
-        ]
-    }
-}
-
-
-# ─────────────────────────────────────────────
-# EVENT GENERATION
-# ─────────────────────────────────────────────
-
-def generate_value(sensor_type):
-    """Generate a realistic simulated value for each sensor type."""
-    ranges = {
-        'EDA':  (0.1, 20.0),
-        'TEMP': (35.0, 38.5),
-        'BVP':  (-200.0, 200.0),
-        'ACC':  (-2.0, 2.0),
-        'ECG':  (-1.5, 1.5),
-        'EMG':  (-0.5, 0.5),
-        'RESP': (0.0, 100.0),
-    }
-    low, high = ranges.get(sensor_type, (0.0, 1.0))
-
-    # ACC is triaxial — returns a dict with x, y, z
-    if sensor_type == 'ACC':
-        return {
-            'x': round(random.uniform(low, high), 4),
-            'y': round(random.uniform(low, high), 4),
-            'z': round(random.uniform(low, high), 4)
-        }
-    return round(random.uniform(low, high), 4)
-
-
-def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, scenario, run_id):
-    """Build a raw event record matching the TFG data model.
-
-    Note: ingest_timestamp is NOT included here — it is added by Lambda
-    at the moment the event is received, so it reflects the real ingestion time.
-    The scenario field allows filtering results per scenario during analysis.
-    """
-    return {
-        'subject_id': subject_id,
-        'device_id': device_id,
-        'sensor_type': sensor_type,
-        'sampling_rate_hz': sampling_rate_hz,
-        'sensor_timestamp': time.time(),
-        'value': generate_value(sensor_type),
-        'unit': unit,
-        'scenario': scenario,
-        'run_id': run_id,
-        'schema_version': SCHEMA_VERSION
-    }
-
-
-# ─────────────────────────────────────────────
-# KINESIS SENDING
-# ─────────────────────────────────────────────
-
-def send_batch_to_kinesis(events):
-    """Send a batch of events to Kinesis using put_records (max 500 per call)."""
-    records = []
-    for event in events:
-        partition_key = f"{event['subject_id']}#{event['sensor_type']}"
-        records.append({
-            'Data': json.dumps(event).encode('utf-8'),
-            'PartitionKey': partition_key
-        })
-
-    # Kinesis put_records allows max 500 records per call
-    for i in range(0, len(records), 500):
-        chunk = records[i:i + 500]
-        try:
-            response = kinesis_client.put_records(
-                Records=chunk,
-                StreamName=STREAM_NAME
-            )
-            failed = response.get('FailedRecordCount', 0)
-            if failed > 0:
-                logger.warning(f"{failed} records failed in Kinesis put_records")
-        except Exception as e:
-            logger.error(f"Error sending to Kinesis: {e}")
-
-
-# ─────────────────────────────────────────────
-# SCENARIO EXECUTION
-# ─────────────────────────────────────────────
-
-def run_scenario(scenario_name, scenario_config, repetition):
-    """Run a single repetition of a scenario."""
-    duration_s = scenario_config['duration_s']
-    subjects = scenario_config['subjects']
-
-    logger.info(
-        f"  Repetition {repetition} — "
-        f"duration: {duration_s}s, "
-        f"subjects: {[s['subject_id'] for s in subjects]}"
-    )
-
-    # Track next emission time per sensor
-    # key: (subject_id, sensor_type) -> next_emit_time
-    next_emit = {}
-    for subject in subjects:
-        for sensor in subject['sensors']:
-            key = (subject['subject_id'], sensor['sensor_type'])
-            next_emit[key] = time.time()
-
-    start_time = time.time()
-    total_sent = 0
-
-    while time.time() - start_time < duration_s:
-        now = time.time()
-        batch = []
-
-        for subject in subjects:
-            for sensor in subject['sensors']:
-                key = (subject['subject_id'], sensor['sensor_type'])
-                interval = 1.0 / sensor['sampling_rate_hz']
-
-                # Emit all pending events for this sensor
-                while next_emit[key] <= now:
-                    event = generate_event(
-                        subject_id=subject['subject_id'],
-                        device_id=subject['device_id'],
-                        sensor_type=sensor['sensor_type'],
-                        sampling_rate_hz=sensor['sampling_rate_hz'],
-                        unit=sensor['unit'],
-                        scenario=scenario_name,
-                        run_id=repetition
-                    )
-                    batch.append(event)
-                    next_emit[key] += interval
-
-        if batch:
-            send_batch_to_kinesis(batch)
-            total_sent += len(batch)
-
-        # Small sleep to avoid busy-waiting
-        time.sleep(0.01)
-
-    elapsed = time.time() - start_time
-    logger.info(f"  -> {total_sent} events sent in {elapsed:.1f}s ({total_sent/elapsed:.1f} ev/s)")
-    return total_sent
-
-
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
-
 def main():
-    logger.info("=" * 60)
-    logger.info("BIOMEDICAL DATA SIMULATOR — TFG Lucia Revaliente")
-    logger.info("=" * 60)
+    parser = argparse.ArgumentParser(description='Post-experiment analysis — TFG Lucia Revaliente')
+    parser.add_argument(
+        '--scenario',
+        choices=['base', 'sustained', 'peak'],
+        required=True,
+        help='Scenario to analyse (base, sustained or peak)'
+    )
+    args = parser.parse_args()
 
-    for scenario_name, scenario_config in SCENARIOS.items():
-        logger.info(f"\n{'─' * 60}")
-        logger.info(f"SCENARIO: {scenario_config['description']}")
-        logger.info(f"{'─' * 60}")
+    scenario   = args.scenario
+    base_dir   = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'experiments')
+    output_dir = os.path.join(base_dir, f'results_{scenario}')
+    os.makedirs(output_dir, exist_ok=True)
 
-        repetitions = scenario_config['repetitions']
-        total_scenario_events = 0
+    # 1. Query DynamoDB and filter by scenario
+    df_all = query_dynamodb()
+    df = df_all[df_all['scenario'] == scenario].copy()
 
-        for rep in range(1, repetitions + 1):
-            sent = run_scenario(scenario_name, scenario_config, rep)
-            total_scenario_events += sent
+    if df.empty:
+        logger.error(f"No records found in DynamoDB for scenario '{scenario}'. Exiting.")
+        return
 
-            # Wait 10s between repetitions to let the system stabilize
-            if rep < repetitions:
-                logger.info("  Waiting 10s before next repetition...")
-                time.sleep(10)
+    logger.info(f"  {len(df)} records filtered for scenario '{scenario}'")
 
-        logger.info(f"  TOTAL scenario '{scenario_name}': {total_scenario_events} events")
+    # 2. Latency metrics
+    metrics_df = compute_latency_metrics(df)
 
-    logger.info("\n" + "=" * 60)
-    logger.info("Simulation completed.")
-    logger.info("=" * 60)
+    # 3. Data integrity
+    integrity_df = compute_integrity(df, scenario)
+
+    # 4. DLQ check
+    dlq_count = check_dlq()
+
+    # 5. SLO report
+    slo_df = compute_slo_report(metrics_df, scenario)
+
+    # 6. Throughput
+    throughput_df = compute_throughput(integrity_df)
+
+    # 7. Figures
+    fig1_boxplot(df, scenario, output_dir)
+    fig2_stacked(metrics_df, scenario, output_dir)
+    fig3_integrity(integrity_df, output_dir)
+    fig4_peak_timeline(df, scenario, output_dir)
+    fig5_throughput(throughput_df, output_dir)
+
+    # 8. Export + summary
+    export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, output_dir)
 
 
 if __name__ == '__main__':

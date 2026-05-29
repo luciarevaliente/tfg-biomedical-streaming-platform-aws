@@ -269,6 +269,13 @@ def main():
 
         logger.info(f"  TOTAL scenario '{scenario_name}': {total_scenario_events} events")
 
+        # Save sent events count to JSON for analysis.py
+        import json as _json, os as _os
+        sent_file = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), f'sent_events_{scenario_name}.json')
+        with open(sent_file, 'w') as f:
+            _json.dump({'scenario': scenario_name, 'events_sent': total_scenario_events}, f)
+        logger.info(f"  Events sent saved to {sent_file}")
+
     logger.info("\n" + "=" * 60)
     logger.info("Simulation completed.")
     logger.info("=" * 60)
