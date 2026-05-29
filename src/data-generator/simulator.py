@@ -4,6 +4,7 @@ import boto3
 import logging
 import random
 import argparse
+import uuid
 
 # Configure logging
 logging.basicConfig(
@@ -133,6 +134,7 @@ def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, s
     at the moment the event is received, so it reflects the real ingestion time.
     """
     return {
+        'event_id': str(uuid.uuid4()),
         'subject_id': subject_id,
         'device_id': device_id,
         'sensor_type': sensor_type,

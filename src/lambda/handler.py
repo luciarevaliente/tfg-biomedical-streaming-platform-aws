@@ -31,7 +31,7 @@ table = dynamodb_resource.Table(DYNAMODB_TABLE)
 # Required fields for validation
 # Note: ingest_timestamp is NOT required here — it is added by Lambda upon receipt
 REQUIRED_FIELDS = [
-    'subject_id', 'device_id', 'sensor_type',
+    'event_id', 'subject_id', 'device_id', 'sensor_type',
     'sampling_rate_hz', 'sensor_timestamp',
     'value', 'unit', 'scenario', 'schema_version'
 ]
@@ -85,6 +85,7 @@ def lambda_handler(event, context):
             processed_record = float_to_decimal({
                 **event_data,
                 'subject_id_sensor_type': f"{event_data['subject_id']}#{event_data['sensor_type']}",
+                'event_id': event_data['event_id'],  
                 'processed_timestamp': processed_timestamp,
                 'sensor_timestamp': event_data['sensor_timestamp'],
                 'ingest_latency_ms': ingest_latency_ms,         # Time from sensor to Lambda
