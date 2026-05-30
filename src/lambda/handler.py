@@ -29,7 +29,6 @@ PROJECT_NAME = os.environ['PROJECT_NAME']
 table = dynamodb_resource.Table(DYNAMODB_TABLE)
 
 # Required fields for validation
-# Note: ingest_timestamp is NOT required here — it is added by Lambda upon receipt
 REQUIRED_FIELDS = [
     'event_id', 'subject_id', 'device_id', 'sensor_type',
     'sampling_rate_hz', 'sensor_timestamp',
@@ -48,7 +47,6 @@ def lambda_handler(event, context):
 
     processed_events = []
     failed_events = []
-    ingest_latencies = []
     processing_latencies = []
     pipeline_latencies = []
 
@@ -62,7 +60,10 @@ def lambda_handler(event, context):
             raw_data = base64.b64decode(record['kinesis']['data']).decode('utf-8')
             event_data = json.loads(raw_data)
 
-            # Add ingest_timestamp here — reflects the real moment Lambda receives the event
+            # Add ingest_timestamp here — reflects the real moment Lambda receives the event from Kinesis.
+            # Note: ingest_latency_ms (ingest_timestamp - sensor_timestamp) is not used as an evaluation
+            # metric due to clock synchronization differences (~74ms) between the local machine and AWS.
+            event_data['ingest_timestamp'] = time.time()
             event_data['ingest_timestamp'] = time.time()
 
             # Validate required fields
@@ -70,10 +71,7 @@ def lambda_handler(event, context):
 
             # Enrich with processed timestamp and latencies
             processed_timestamp = time.time()
-
-            ingest_latency_ms = int(
-                (event_data['ingest_timestamp'] - event_data['sensor_timestamp']) * 1000
-            )
+        
             processing_latency_ms = int(
                 (processed_timestamp - event_data['ingest_timestamp']) * 1000
             )
@@ -85,19 +83,17 @@ def lambda_handler(event, context):
             processed_record = float_to_decimal({
                 **event_data,
                 'subject_id_sensor_type': f"{event_data['subject_id']}#{event_data['sensor_type']}",
-                'event_id': event_data['event_id'],  
+                'event_id': event_data['event_id'],
                 'processed_timestamp': processed_timestamp,
                 'sensor_timestamp': event_data['sensor_timestamp'],
-                'ingest_latency_ms': ingest_latency_ms,         # Time from sensor to Lambda
-                'processing_latency_ms': processing_latency_ms, # Time Lambda takes to process
-                'pipeline_latency_ms': pipeline_latency_ms      # Total end-to-end latency: SLO
+                'processing_latency_ms': processing_latency_ms,  # Time from Kinesis to DynamoDB
+                'pipeline_latency_ms': pipeline_latency_ms       # Total end-to-end latency: SLO
             })
 
             # Write processed record to DynamoDB
             write_processed_to_dynamodb(processed_record)
 
             processed_events.append(processed_record)
-            ingest_latencies.append(ingest_latency_ms)
             processing_latencies.append(processing_latency_ms)
             pipeline_latencies.append(pipeline_latency_ms)
 
@@ -113,7 +109,6 @@ def lambda_handler(event, context):
     send_metrics(
         total_records=len(records),
         processed_count=len(processed_events),
-        ingest_latencies=ingest_latencies,
         processing_latencies=processing_latencies,
         pipeline_latencies=pipeline_latencies
     )
@@ -183,7 +178,7 @@ def send_to_dlq(failed_events):
             logger.error(f"Failed to send event to DLQ: {e}")
 
 
-def send_metrics(total_records, processed_count, ingest_latencies, processing_latencies, pipeline_latencies):
+def send_metrics(total_records, processed_count, processing_latencies, pipeline_latencies):
     """Send custom metrics to CloudWatch in batches of max 1000."""
     try:
         metrics = [
@@ -204,13 +199,6 @@ def send_metrics(total_records, processed_count, ingest_latencies, processing_la
             }
         ]
 
-        # Latencies in pipeline order: ingest → processing → pipeline
-        for latency in ingest_latencies:
-            metrics.append({
-                'MetricName': 'IngestLatencyMs',
-                'Value': latency,
-                'Unit': 'Milliseconds'
-            })
         for latency in processing_latencies:
             metrics.append({
                 'MetricName': 'ProcessingLatencyMs',

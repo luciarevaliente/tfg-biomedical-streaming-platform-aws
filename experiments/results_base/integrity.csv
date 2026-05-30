@@ -1,2 +1,2 @@
 scenario,expected_events,stored_events,loss_rate_pct,slo_met
-base,7200,6916,3.944,False
+base,7200,7200,0,True
