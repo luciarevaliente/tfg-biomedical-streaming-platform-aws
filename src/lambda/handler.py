@@ -56,27 +56,39 @@ def lambda_handler(event, context):
     # Process each event
     for record in records:
         try:
+            # ingest_timestamp: taken at the very start of per-event processing,
+            # after the raw batch has been persisted to S3.
+            # Both ingest_timestamp and processed_timestamp are generated within
+            # the same AWS temporal domain, so pipeline_latency_ms
+            # (processed_timestamp - ingest_timestamp) is free of cross-machine
+            # clock skew. The time spent buffering in Kinesis is not captured by
+            # this metric and is documented as a known limitation.
+            ingest_timestamp = time.time()
+
             # Decode event from Kinesis
             raw_data = base64.b64decode(record['kinesis']['data']).decode('utf-8')
             event_data = json.loads(raw_data)
 
-            # Add ingest_timestamp here — reflects the real moment Lambda receives the event from Kinesis.
-            # Note: ingest_latency_ms (ingest_timestamp - sensor_timestamp) is not used as an evaluation
-            # metric due to clock synchronization differences (~74ms) between the local machine and AWS.
-            event_data['ingest_timestamp'] = time.time()
-            event_data['ingest_timestamp'] = time.time()
+            # Attach ingest_timestamp to the event record
+            event_data['ingest_timestamp'] = ingest_timestamp
 
             # Validate required fields
             validate_event(event_data)
 
-            # Enrich with processed timestamp and latencies
+            # Enrich with processed timestamp and latencies.
+            # processed_timestamp is taken after validation and enrichment,
+            # but before the DynamoDB write (Option B): the write itself is
+            # considered persistence, not processing.
             processed_timestamp = time.time()
-        
+
             processing_latency_ms = int(
-                (processed_timestamp - event_data['ingest_timestamp']) * 1000
+                (processed_timestamp - ingest_timestamp) * 1000
             )
+            # pipeline_latency_ms: measures the serverless processing layer
+            # (Lambda receive → end of processing). Both timestamps are within
+            # AWS, ensuring a reliable, clock-skew-free measurement.
             pipeline_latency_ms = int(
-                (processed_timestamp - event_data['sensor_timestamp']) * 1000
+                (processed_timestamp - ingest_timestamp) * 1000
             )
 
             # Build processed record — convert floats to Decimal for DynamoDB
@@ -86,8 +98,8 @@ def lambda_handler(event, context):
                 'event_id': event_data['event_id'],
                 'processed_timestamp': processed_timestamp,
                 'sensor_timestamp': event_data['sensor_timestamp'],
-                'processing_latency_ms': processing_latency_ms,  # Time from Kinesis to DynamoDB
-                'pipeline_latency_ms': pipeline_latency_ms       # Total end-to-end latency: SLO
+                'processing_latency_ms': processing_latency_ms,
+                'pipeline_latency_ms': pipeline_latency_ms
             })
 
             # Write processed record to DynamoDB

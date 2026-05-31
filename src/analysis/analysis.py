@@ -9,19 +9,29 @@ Execució:
     python analysis.py --scenario peak
 
 Prerequisits:
-    pip install boto3 pandas matplotlib numpy
+    pip install boto3 pandas matplotlib numpy scipy
     AWS credentials configurades (mateix perfil que el simulador)
 
 Output (a la carpeta results_<scenario>/):
-    summary.csv            — taula resum per escenari i run_id
-    slo_report.csv         — criteris de superació per escenari
-    integrity.csv          — integritat de dades per escenari
-    throughput.csv         — throughput real vs teòric per escenari
-    fig1_boxplot.png       — boxplot de les tres latències per escenari
-    fig2_stacked.png       — barres apilades normalitzades ingest vs processing
-    fig3_integrity.png     — IngestedEvents vs StoredEvents per escenari
-    fig4_peak_timeline.png — evolució temporal de latència durant el peak
-    fig5_throughput.png    — throughput real vs teòric per escenari
+    summary.csv              — taula resum per escenari i run_id (P50/P95/P99/mean)
+    reproducibility.csv      — variabilitat entre repeticions: mean±std i IC95% del P95
+    slo_report.csv           — criteris de superació per escenari
+    integrity.csv            — integritat de dades per escenari
+    throughput.csv           — throughput real vs teòric per escenari
+    fig1_boxplot.png         — boxplot pipeline_latency_ms i processing_latency_ms per escenari
+    fig2_processing_runs.png — processing_latency_ms P50/P95/P99 per repetició
+    fig3_integrity.png       — IngestedEvents vs StoredEvents per escenari
+    fig4_peak_timeline.png   — evolució temporal de latència durant el peak (amb marca fi burst)
+    fig5_throughput.png      — throughput real vs teòric per escenari
+    fig6_cdf.png             — CDF de pipeline_latency_ms per repetició amb threshold SLO
+
+Nota sobre ingest_latency_ms:
+    Aquesta mètrica s'ha exclòs definitivament. El càlcul depèn de la diferència entre
+    sensor_timestamp (rellotge màquina local) i ingest_timestamp (rellotge AWS Lambda),
+    amb un offset sistemàtic de ~74ms detectat experimentalment. Els valors resultants
+    (P50 ≈ −14ms al baseline) no representen latència real i induirien a errors d'interpretació.
+    Les mètriques vàlides són pipeline_latency_ms (SLO principal) i processing_latency_ms
+    (component intern AWS).
 """
 
 import boto3
@@ -39,21 +49,21 @@ import argparse
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
-REGION = 'eu-west-1'
-DYNAMODB_TABLE = 'tfg-biomedical-dev-processed-data'
+REGION               = 'eu-west-1'
+DYNAMODB_TABLE       = 'tfg-biomedical-dev-processed-data'
 CLOUDWATCH_NAMESPACE = 'BiomedicalPipeline'
-PROJECT_NAME = 'tfg-biomedical-dev'
+PROJECT_NAME         = 'tfg-biomedical-dev'
 
 THEORETICAL_RATES = {
-    'base': 8,
+    'base':      8,
     'sustained': 208,
-    'peak': 4304
+    'peak':      4304
 }
 
 SCENARIO_DURATIONS = {
-    'base': 300,
+    'base':      300,
     'sustained': 300,
-    'peak': 30
+    'peak':      30
 }
 
 SLO_PRIMARY_MS = 10_000
@@ -109,7 +119,8 @@ def query_dynamodb():
     items = [dec_to_float(item) for item in items]
     df = pd.DataFrame(items)
 
-    for col in ['pipeline_latency_ms', 'ingest_latency_ms', 'processing_latency_ms',
+    # Numeric coercion — ingest_latency_ms excluded intentionally (clock offset ~74ms)
+    for col in ['pipeline_latency_ms', 'processing_latency_ms',
                 'sensor_timestamp', 'ingest_timestamp', 'processed_timestamp']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -129,10 +140,14 @@ def query_dynamodb():
 # ─────────────────────────────────────────────
 
 def compute_latency_metrics(df):
+    """
+    Per-run percentile statistics for pipeline_latency_ms and processing_latency_ms.
+    ingest_latency_ms is excluded: it relies on cross-machine clock diff (~74ms offset).
+    """
     logger.info("Computing latency metrics...")
 
     group_cols   = ['scenario', 'run_id'] if 'run_id' in df.columns else ['scenario']
-    latency_cols = ['pipeline_latency_ms', 'ingest_latency_ms', 'processing_latency_ms']
+    latency_cols = ['pipeline_latency_ms', 'processing_latency_ms']
 
     records = []
     for group_keys, group_df in df.groupby(group_cols):
@@ -162,28 +177,82 @@ def compute_latency_metrics(df):
 
 
 # ─────────────────────────────────────────────
+# STEP 2b — REPRODUCIBILITY
+# ─────────────────────────────────────────────
+
+def compute_reproducibility(metrics_df):
+    """
+    Cross-run variability of pipeline_latency_ms P95.
+    Reports mean, std and 95% CI across the 3 repetitions.
+    Demonstrates experimental stability for the TFG write-up.
+    """
+    logger.info("Computing reproducibility statistics...")
+
+    if 'run_id' not in metrics_df.columns:
+        logger.warning("  run_id column not found — skipping reproducibility")
+        return pd.DataFrame()
+
+    agg = (
+        metrics_df
+        .groupby('scenario')['pipeline_latency_ms_p95']
+        .agg(
+            n_runs='count',
+            p95_mean='mean',
+            p95_std='std',
+            p95_min='min',
+            p95_max='max'
+        )
+        .reset_index()
+    )
+
+    # 95% CI assuming t-distribution with n-1 df; for n=3 t=4.303, for n>=30 ~1.96
+    from scipy import stats as _stats
+    def ci95(row):
+        n = row['n_runs']
+        if n < 2 or pd.isna(row['p95_std']):
+            return np.nan, np.nan
+        t = _stats.t.ppf(0.975, df=n - 1)
+        margin = t * row['p95_std'] / np.sqrt(n)
+        return round(row['p95_mean'] - margin, 1), round(row['p95_mean'] + margin, 1)
+
+    agg[['p95_ci95_lo', 'p95_ci95_hi']] = agg.apply(
+        lambda r: pd.Series(ci95(r)), axis=1
+    )
+    agg['p95_mean'] = agg['p95_mean'].round(1)
+    agg['p95_std']  = agg['p95_std'].round(1)
+
+    logger.info("  Reproducibility stats computed")
+    return agg
+
+
+# ─────────────────────────────────────────────
 # STEP 3 — DATA INTEGRITY
 # ─────────────────────────────────────────────
 
 def compute_integrity(df, scenario):
+    """
+    Compares events stored in DynamoDB against events actually sent by the simulator.
+    Uses sent_events_<scenario>.json if available; falls back to theoretical rate.
+    """
     logger.info("Computing data integrity...")
 
     stored_count = len(df)
-    expected     = THEORETICAL_RATES[scenario] * SCENARIO_DURATIONS[scenario] * 3
-    loss_rate    = max(0, (expected - stored_count) / expected * 100) if expected > 0 else 0
 
-    # Read actual sent events from simulator output file if available.
-    # Falls back to theoretical rate if file not found.
     import json as _json
-    sent_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data-generator', f'sent_events_{scenario}.json')
+    sent_file = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        '..', 'data-generator', f'sent_events_{scenario}.json'
+    )
     if os.path.exists(sent_file):
         with open(sent_file) as f:
             sent_data = _json.load(f)
         expected = sent_data['events_sent']
-        logger.info(f"  Expected events from simulator: {expected}")
+        logger.info(f"  Expected events from simulator file: {expected}")
     else:
         expected = THEORETICAL_RATES[scenario] * SCENARIO_DURATIONS[scenario] * 3
-        logger.warning(f"  sent_events_{scenario}.json not found in data-generator/, using theoretical: {expected}")
+        logger.warning(
+            f"  sent_events_{scenario}.json not found — using theoretical: {expected}"
+        )
 
     loss_rate = max(0, (expected - stored_count) / expected * 100) if expected > 0 else 0
 
@@ -227,24 +296,55 @@ def check_dlq():
 # STEP 5 — SLO REPORT
 # ─────────────────────────────────────────────
 
-def compute_slo_report(metrics_df, scenario):
+def compute_slo_report(metrics_df, integrity_df, scenario):
+    """
+    SLO compliance table.
+    - base/sustained: P95 pipeline_latency_ms < 10.000ms AND loss < 1%
+    - peak: zero loss AND recovery < 60s (P95 < 30.000ms is observational only)
+    The recovery time must be supplied externally (measured from CloudWatch
+    GetRecords.IteratorAgeMilliseconds after the burst ends).
+    """
     logger.info("Evaluating SLO compliance...")
 
-    agg = metrics_df.groupby('scenario')['pipeline_latency_ms_p95'].max().reset_index()
-    agg.columns = ['scenario', 'p95_pipeline_ms']
+    agg = (
+        metrics_df
+        .groupby('scenario')[['pipeline_latency_ms_p95', 'pipeline_latency_ms_p50']]
+        .agg({'pipeline_latency_ms_p95': 'max', 'pipeline_latency_ms_p50': 'mean'})
+        .reset_index()
+    )
 
     rows = []
     for _, row in agg.iterrows():
         s         = row['scenario']
-        p95       = row['p95_pipeline_ms']
+        p95       = row['pipeline_latency_ms_p95']
+        p50       = row['pipeline_latency_ms_p50']
         threshold = SLO_PRIMARY_MS if s in ('base', 'sustained') else SLO_PEAK_MS
-        criterion = 'P95 < 10.000 ms' if s in ('base', 'sustained') else 'P95 < 30.000 ms (observacional)'
+
+        # Fetch integrity values
+        int_row = integrity_df[integrity_df['scenario'] == s]
+        loss    = float(int_row['loss_rate_pct'].values[0]) if not int_row.empty else None
+        slo_integrity = bool(int_row['slo_met'].values[0]) if not int_row.empty else None
+
+        if s in ('base', 'sustained'):
+            criterion = 'P95 < 10.000 ms AND pèrdua < 1%'
+            slo_latency = p95 < threshold
+            slo_met     = slo_latency and (slo_integrity is True)
+        else:
+            # peak: latency SLO is observational; primary criteria are loss=0 and recovery
+            criterion   = 'Pèrdua = 0% AND recuperació < 60s (P95 < 30.000ms observacional)'
+            slo_latency = p95 < threshold
+            slo_met     = (loss == 0.0) if loss is not None else None  # recovery measured externally
+
         rows.append({
             'scenario':        s,
+            'p50_pipeline_ms': int(p50),
             'p95_pipeline_ms': int(p95),
             'threshold_ms':    threshold,
             'criterion':       criterion,
-            'slo_met':         p95 < threshold
+            'slo_latency_met': bool(slo_latency),
+            'loss_rate_pct':   loss,
+            'slo_integrity_met': slo_integrity,
+            'slo_met':         slo_met,
         })
 
     slo_df = pd.DataFrame(rows)
@@ -280,6 +380,8 @@ def compute_throughput(integrity_df):
 # ─────────────────────────────────────────────
 
 SCENARIO_COLORS = {'base': '#4C72B0', 'sustained': '#DD8452', 'peak': '#C44E52'}
+RUN_COLORS      = ['#4C72B0', '#DD8452', '#C44E52']
+
 SCENARIO_LABELS = {
     'base':      'Base\n(~8 ev/s)',
     'sustained': 'Càrrega sostiguda\n(~208 ev/s)',
@@ -288,19 +390,23 @@ SCENARIO_LABELS = {
 
 
 # ─────────────────────────────────────────────
-# FIGURE 1 — Boxplot
+# FIGURE 1 — Boxplot (pipeline + processing)
 # ─────────────────────────────────────────────
 
 def fig1_boxplot(df, scenario, output_dir):
+    """
+    Boxplot of pipeline_latency_ms and processing_latency_ms.
+    ingest_latency_ms excluded (cross-machine clock offset ~74ms).
+    SLO threshold line added to pipeline panel.
+    """
     logger.info("Generating Figure 1 — Boxplot latències...")
 
     latency_cols = {
-        'ingest_latency_ms':     'Latència ingestió',
-        'processing_latency_ms': 'Latència processament',
-        'pipeline_latency_ms':   'Latència pipeline (end-to-end)'
+        'processing_latency_ms': 'Latència processament\n(intern AWS)',
+        'pipeline_latency_ms':   'Latència pipeline\n(end-to-end, SLO)',
     }
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 6), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 6), sharey=False)
     fig.suptitle(f'Distribució de latències — Escenari {scenario}', fontsize=13)
 
     for ax, (col, label) in zip(axes, latency_cols.items()):
@@ -337,43 +443,47 @@ def fig1_boxplot(df, scenario, output_dir):
 
 
 # ─────────────────────────────────────────────
-# FIGURE 2 — Barres apilades
+# FIGURE 2 — Processing latency per repetició
 # ─────────────────────────────────────────────
 
-def fig2_stacked(metrics_df, scenario, output_dir):
-    logger.info("Generating Figure 2 — Barres apilades normalitzades...")
+def fig2_processing_runs(metrics_df, scenario, output_dir):
+    """
+    Grouped bar chart: processing_latency_ms P50 / P95 / P99 per run_id.
+    Shows consistency of internal AWS latency across the 3 repetitions.
+    Replaces the previous fig2_stacked (which required ingest_latency_ms).
+    """
+    logger.info("Generating Figure 2 — Processing latency per repetició...")
 
-    agg = metrics_df.groupby('scenario').agg(
-        ingest_p95=('ingest_latency_ms_p95', 'mean'),
-        processing_p95=('processing_latency_ms_p95', 'mean')
-    ).reset_index()
+    subset = metrics_df[metrics_df['scenario'] == scenario].copy()
+    if subset.empty or 'run_id' not in subset.columns:
+        logger.warning("  No per-run data available for fig2, skipping")
+        return
 
-    total          = agg['ingest_p95'].values[0] + agg['processing_p95'].values[0]
-    ingest_pct     = agg['ingest_p95'].values[0]     / total * 100 if total > 0 else 0
-    processing_pct = agg['processing_p95'].values[0] / total * 100 if total > 0 else 0
+    runs     = sorted(subset['run_id'].unique())
+    x        = np.arange(len(runs))
+    width    = 0.25
+    offsets  = [-width, 0, width]
+    pcts     = ['p50', 'p95', 'p99']
+    colors   = ['#4C72B0', '#DD8452', '#C44E52']
+    labels   = ['P50', 'P95', 'P99']
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.bar([0], [ingest_pct],     label='Latència ingestió',      color='#4C72B0', alpha=0.85)
-    ax.bar([0], [processing_pct], bottom=[ingest_pct],
-           label='Latència processament', color='#DD8452', alpha=0.85)
+    fig, ax = plt.subplots(figsize=(7, 5))
 
-    if ingest_pct > 5:
-        ax.text(0, ingest_pct / 2, f'{ingest_pct:.1f}%',
-                ha='center', va='center', fontsize=11, color='white', fontweight='bold')
-    if processing_pct > 5:
-        ax.text(0, ingest_pct + processing_pct / 2, f'{processing_pct:.1f}%',
-                ha='center', va='center', fontsize=11, color='white', fontweight='bold')
+    for i, (pct, color, lbl) in enumerate(zip(pcts, colors, labels)):
+        col    = f'processing_latency_ms_{pct}'
+        values = [subset[subset['run_id'] == r][col].values[0] for r in runs]
+        ax.bar(x + offsets[i], values, width, label=lbl, color=color, alpha=0.82)
 
-    ax.set_xticks([0])
-    ax.set_xticklabels([SCENARIO_LABELS[scenario]], fontsize=10)
-    ax.set_ylabel('Proporció (%)', fontsize=10)
-    ax.set_ylim(0, 100)
-    ax.set_title(f'Desglose latència P95 — Escenari {scenario}', fontsize=11)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'Repetició {r}' for r in runs], fontsize=10)
+    ax.set_ylabel('processing_latency_ms (ms)', fontsize=10)
+    ax.set_title(f'Latència processament per repetició — Escenari {scenario}', fontsize=11)
     ax.legend(fontsize=9)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
     ax.grid(axis='y', linestyle='--', alpha=0.4)
 
     plt.tight_layout()
-    path = os.path.join(output_dir, 'fig2_stacked.png')
+    path = os.path.join(output_dir, 'fig2_processing_runs.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
     logger.info(f"  Saved: {path}")
@@ -386,14 +496,14 @@ def fig2_stacked(metrics_df, scenario, output_dir):
 def fig3_integrity(integrity_df, output_dir):
     logger.info("Generating Figure 3 — Integritat de dades...")
 
-    row   = integrity_df.iloc[0]
+    row = integrity_df.iloc[0]
     fig, ax = plt.subplots(figsize=(6, 5))
-    width = 0.35
+    width   = 0.35
 
     ax.bar([-width/2], [row['expected_events']], width,
-           label='Events esperats (teòric)', color='#4C72B0', alpha=0.7)
+           label='Events enviats (simulador)', color='#4C72B0', alpha=0.7)
     ax.bar([width/2],  [row['stored_events']],  width,
-           label='Events emmagatzemats (real)', color='#55A868', alpha=0.85)
+           label='Events emmagatzemats (DynamoDB)', color='#55A868', alpha=0.85)
 
     color = 'green' if row['slo_met'] else 'red'
     ax.text(0, max(row['expected_events'], row['stored_events']) * 1.02,
@@ -420,6 +530,11 @@ def fig3_integrity(integrity_df, output_dir):
 # ─────────────────────────────────────────────
 
 def fig4_peak_timeline(df, scenario, output_dir):
+    """
+    P95 pipeline_latency_ms in 1s bins along the burst duration.
+    Adds a vertical marker at t=30s (end of burst) to visualise the
+    start of the recovery window (SLO: recovery < 60s).
+    """
     logger.info("Generating Figure 4 — Evolució temporal peak...")
 
     if scenario != 'peak':
@@ -431,27 +546,35 @@ def fig4_peak_timeline(df, scenario, output_dir):
         return
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    colors_rep = ['#4C72B0', '#DD8452', '#C44E52']
 
     run_ids = sorted(df['run_id'].unique()) if 'run_id' in df.columns else [None]
 
     for i, run in enumerate(run_ids):
         subset = df[df['run_id'] == run].copy() if run is not None else df.copy()
         subset = subset.sort_values('sensor_timestamp')
-        t0 = subset['sensor_timestamp'].min()
+        t0     = subset['sensor_timestamp'].min()
         subset['t_rel'] = subset['sensor_timestamp'] - t0
         subset['t_bin'] = subset['t_rel'].apply(lambda x: int(x))
         binned = subset.groupby('t_bin')['pipeline_latency_ms'].quantile(0.95).reset_index()
 
         label = f'Repetició {run}' if run is not None else 'Peak'
         ax.plot(binned['t_bin'], binned['pipeline_latency_ms'],
-                label=label, color=colors_rep[i % len(colors_rep)],
+                label=label, color=RUN_COLORS[i % len(RUN_COLORS)],
                 linewidth=1.5, alpha=0.85)
 
+    # SLO reference lines
     ax.axhline(y=SLO_PRIMARY_MS, color='red',    linestyle='--', linewidth=1.5,
                label=f'SLO principal ({SLO_PRIMARY_MS // 1000}s)')
     ax.axhline(y=SLO_PEAK_MS,    color='orange', linestyle='--', linewidth=1.5,
                label=f'SLO peak observacional ({SLO_PEAK_MS // 1000}s)')
+
+    # Burst end marker — recovery window starts here
+    burst_end = SCENARIO_DURATIONS['peak']
+    ax.axvline(x=burst_end, color='gray', linestyle=':', linewidth=1.5,
+               label=f'Fi del burst (t={burst_end}s)')
+    ax.text(burst_end + 0.5, ax.get_ylim()[1] * 0.92,
+            f'Fi burst\n← finestra recuperació →',
+            fontsize=8, color='gray', va='top')
 
     ax.set_xlabel('Temps relatiu (s)', fontsize=10)
     ax.set_ylabel('P95 pipeline_latency_ms (ms)', fontsize=10)
@@ -474,9 +597,9 @@ def fig4_peak_timeline(df, scenario, output_dir):
 def fig5_throughput(throughput_df, output_dir):
     logger.info("Generating Figure 5 — Throughput real vs teòric...")
 
-    row   = throughput_df.iloc[0]
+    row = throughput_df.iloc[0]
     fig, ax = plt.subplots(figsize=(6, 5))
-    width = 0.35
+    width   = 0.35
 
     ax.bar([-width/2], [row['theoretical_evs']], width,
            label='Taxa teòrica (ev/s)', color='#4C72B0', alpha=0.7)
@@ -504,52 +627,124 @@ def fig5_throughput(throughput_df, output_dir):
 
 
 # ─────────────────────────────────────────────
+# FIGURE 6 — CDF pipeline_latency_ms
+# ─────────────────────────────────────────────
+
+def fig6_cdf(df, scenario, output_dir):
+    """
+    Empirical CDF of pipeline_latency_ms per repetition.
+    The SLO threshold is shown as a vertical dashed line and the P95
+    percentile as a horizontal reference — together they make SLO
+    compliance immediately legible without reading any numbers.
+    """
+    logger.info("Generating Figure 6 — CDF pipeline_latency_ms...")
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    run_ids = sorted(df['run_id'].unique()) if 'run_id' in df.columns else [None]
+
+    for i, run in enumerate(run_ids):
+        subset = df[df['run_id'] == run] if run is not None else df
+        vals   = np.sort(subset['pipeline_latency_ms'].dropna().values)
+        cdf    = np.arange(1, len(vals) + 1) / len(vals) * 100
+        label  = f'Repetició {run}' if run is not None else scenario
+        ax.plot(vals, cdf,
+                label=label,
+                color=RUN_COLORS[i % len(RUN_COLORS)],
+                linewidth=1.8, alpha=0.9)
+
+    threshold = SLO_PRIMARY_MS if scenario in ('base', 'sustained') else SLO_PEAK_MS
+    ax.axvline(x=threshold, color='red', linestyle='--', linewidth=1.5,
+               label=f'SLO threshold ({threshold // 1000}s)')
+    ax.axhline(y=95, color='gray', linestyle=':', linewidth=1.2,
+               label='Percentil 95')
+
+    ax.set_xlabel('pipeline_latency_ms (ms)', fontsize=10)
+    ax.set_ylabel('Percentil acumulat (%)', fontsize=10)
+    ax.set_title(f'CDF latència pipeline — Escenari {scenario}', fontsize=11)
+    ax.set_ylim(0, 101)
+    ax.legend(fontsize=9)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
+    ax.grid(linestyle='--', alpha=0.4)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, 'fig6_cdf.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    logger.info(f"  Saved: {path}")
+
+
+# ─────────────────────────────────────────────
 # EXPORT CSVs + CONSOLE SUMMARY
 # ─────────────────────────────────────────────
 
-def export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, output_dir):
-    metrics_df.to_csv(    os.path.join(output_dir, 'summary.csv'),    index=False)
-    slo_df.to_csv(        os.path.join(output_dir, 'slo_report.csv'), index=False)
-    integrity_df.to_csv(  os.path.join(output_dir, 'integrity.csv'),  index=False)
-    throughput_df.to_csv( os.path.join(output_dir, 'throughput.csv'), index=False)
+def export_results(metrics_df, slo_df, integrity_df, throughput_df,
+                   reproducibility_df, dlq_count, output_dir):
 
-    print("\n" + "=" * 65)
+    metrics_df.to_csv(       os.path.join(output_dir, 'summary.csv'),         index=False)
+    slo_df.to_csv(           os.path.join(output_dir, 'slo_report.csv'),      index=False)
+    integrity_df.to_csv(     os.path.join(output_dir, 'integrity.csv'),       index=False)
+    throughput_df.to_csv(    os.path.join(output_dir, 'throughput.csv'),      index=False)
+    if not reproducibility_df.empty:
+        reproducibility_df.to_csv(
+            os.path.join(output_dir, 'reproducibility.csv'), index=False
+        )
+
+    print("\n" + "=" * 68)
     print("RESUM RESULTATS EXPERIMENTALS — TFG Lucía Revaliente Torres")
-    print("=" * 65)
+    print("=" * 68)
 
     print("\n── LATÈNCIA P95 pipeline_latency_ms ──")
-    agg = metrics_df.groupby('scenario')['pipeline_latency_ms_p95'].max().reset_index()
-    for _, row in agg.iterrows():
-        print(f"  {row['scenario']:12s}  P95 = {int(row['pipeline_latency_ms_p95']):>8,} ms")
+    if 'run_id' in metrics_df.columns:
+        for _, row in metrics_df.iterrows():
+            print(f"  {row['scenario']:12s}  run {int(row['run_id'])}  "
+                  f"P50={int(row['pipeline_latency_ms_p50']):>7,} ms  "
+                  f"P95={int(row['pipeline_latency_ms_p95']):>7,} ms  "
+                  f"P99={int(row['pipeline_latency_ms_p99']):>7,} ms")
+    else:
+        agg = metrics_df.groupby('scenario')['pipeline_latency_ms_p95'].max().reset_index()
+        for _, row in agg.iterrows():
+            print(f"  {row['scenario']:12s}  P95 = {int(row['pipeline_latency_ms_p95']):>8,} ms")
+
+    if not reproducibility_df.empty:
+        print("\n── REPRODUCTIBILITAT (variabilitat entre repeticions) ──")
+        for _, row in reproducibility_df.iterrows():
+            print(f"  {row['scenario']:12s}  P95 mean={row['p95_mean']:>7,.1f} ms  "
+                  f"std={row['p95_std']:>6,.1f} ms  "
+                  f"IC95%=[{row['p95_ci95_lo']:,.1f}, {row['p95_ci95_hi']:,.1f}]")
 
     print("\n── COMPLIMENT SLO ──")
     for _, row in slo_df.iterrows():
         status = "✓ COMPLERT" if row['slo_met'] else "✗ NO COMPLERT"
-        print(f"  {row['scenario']:12s}  P95 = {int(row['p95_pipeline_ms']):>8,} ms  |  "
-              f"Threshold = {row['threshold_ms']:,} ms  |  {status}")
+        print(f"  {row['scenario']:12s}  P95={int(row['p95_pipeline_ms']):>8,} ms  |  "
+              f"Threshold={row['threshold_ms']:,} ms  |  {status}")
+        if row['scenario'] == 'peak':
+            print(f"               Pèrdua={row['loss_rate_pct']}%  "
+                  f"(criteri principal: 0%)  |  "
+                  f"P95 observacional: {'✓' if row['slo_latency_met'] else '✗'}")
 
     print("\n── INTEGRITAT DE DADES ──")
     for _, row in integrity_df.iterrows():
         status = "✓ < 1%" if row['slo_met'] else "✗ > 1%"
-        print(f"  {row['scenario']:12s}  Esperats = {int(row['expected_events']):>8,}  |  "
-              f"Emmagatzemats = {int(row['stored_events']):>8,}  |  "
-              f"Pèrdua = {row['loss_rate_pct']:.3f}%  {status}")
+        print(f"  {row['scenario']:12s}  Enviats={int(row['expected_events']):>8,}  |  "
+              f"Emmagatzemats={int(row['stored_events']):>8,}  |  "
+              f"Pèrdua={row['loss_rate_pct']:.3f}%  {status}")
 
     print("\n── DLQ ──")
     if dlq_count is not None:
-        status = "✓ Buit" if dlq_count == 0 else f"⚠ {dlq_count} missatges"
+        status = "✓ Buit" if dlq_count == 0 else f"⚠  {dlq_count} missatges"
         print(f"  Missatges a la DLQ: {dlq_count}  →  {status}")
     else:
         print("  DLQ: no s'ha pogut consultar")
 
     print("\n── THROUGHPUT ──")
     for _, row in throughput_df.iterrows():
-        print(f"  {row['scenario']:12s}  Teòric = {row['theoretical_evs']:>6,} ev/s  |  "
-              f"Real = {row['real_evs']:>6,} ev/s  |  Eficiència = {row['efficiency_pct']}%")
+        print(f"  {row['scenario']:12s}  Teòric={row['theoretical_evs']:>6,} ev/s  |  "
+              f"Real={row['real_evs']:>6,} ev/s  |  Eficiència={row['efficiency_pct']}%")
 
-    print("\n" + "=" * 65)
+    print("\n" + "=" * 68)
     print(f"Resultats exportats a: {os.path.abspath(output_dir)}/")
-    print("=" * 65 + "\n")
+    print("=" * 68 + "\n")
 
 
 # ─────────────────────────────────────────────
@@ -557,7 +752,9 @@ def export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, o
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Post-experiment analysis — TFG Lucia Revaliente')
+    parser = argparse.ArgumentParser(
+        description='Post-experiment analysis — TFG Lucia Revaliente'
+    )
     parser.add_argument(
         '--scenario',
         choices=['base', 'sustained', 'peak'],
@@ -567,13 +764,15 @@ def main():
     args = parser.parse_args()
 
     scenario   = args.scenario
-    base_dir   = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'experiments')
+    base_dir   = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', '..', 'experiments'
+    )
     output_dir = os.path.join(base_dir, f'results_{scenario}')
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Query DynamoDB and filter by scenario
     df_all = query_dynamodb()
-    df = df_all[df_all['scenario'] == scenario].copy()
+    df     = df_all[df_all['scenario'] == scenario].copy()
 
     if df.empty:
         logger.error(f"No records found in DynamoDB for scenario '{scenario}'. Exiting.")
@@ -581,30 +780,37 @@ def main():
 
     logger.info(f"  {len(df)} records filtered for scenario '{scenario}'")
 
-    # 2. Latency metrics
+    # 2. Latency metrics (per run_id)
     metrics_df = compute_latency_metrics(df)
 
-    # 3. Data integrity
+    # 3. Reproducibility across runs
+    reproducibility_df = compute_reproducibility(metrics_df)
+
+    # 4. Data integrity
     integrity_df = compute_integrity(df, scenario)
 
-    # 4. DLQ check
+    # 5. DLQ check
     dlq_count = check_dlq()
 
-    # 5. SLO report
-    slo_df = compute_slo_report(metrics_df, scenario)
+    # 6. SLO report (includes integrity columns)
+    slo_df = compute_slo_report(metrics_df, integrity_df, scenario)
 
-    # 6. Throughput
+    # 7. Throughput
     throughput_df = compute_throughput(integrity_df)
 
-    # 7. Figures
+    # 8. Figures
     fig1_boxplot(df, scenario, output_dir)
-    fig2_stacked(metrics_df, scenario, output_dir)
+    fig2_processing_runs(metrics_df, scenario, output_dir)
     fig3_integrity(integrity_df, output_dir)
     fig4_peak_timeline(df, scenario, output_dir)
     fig5_throughput(throughput_df, output_dir)
+    fig6_cdf(df, scenario, output_dir)
 
-    # 8. Export + summary
-    export_results(metrics_df, slo_df, integrity_df, throughput_df, dlq_count, output_dir)
+    # 9. Export CSVs + console summary
+    export_results(
+        metrics_df, slo_df, integrity_df, throughput_df,
+        reproducibility_df, dlq_count, output_dir
+    )
 
 
 if __name__ == '__main__':

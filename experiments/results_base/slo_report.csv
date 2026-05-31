@@ -1,2 +1,2 @@
-scenario,p95_pipeline_ms,threshold_ms,criterion,slo_met
-base,394,10000,P95 < 10.000 ms,True
+scenario,p50_pipeline_ms,p95_pipeline_ms,threshold_ms,criterion,slo_latency_met,loss_rate_pct,slo_integrity_met,slo_met
+base,697,1051,10000,P95 < 10.000 ms AND pèrdua < 1%,True,0.0,True,True
