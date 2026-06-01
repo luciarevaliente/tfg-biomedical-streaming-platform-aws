@@ -128,11 +128,7 @@ def generate_value(sensor_type):
 
 
 def generate_event(subject_id, device_id, sensor_type, sampling_rate_hz, unit, scenario, run_id):
-    """Build a raw event record matching the TFG data model.
-
-    Note: ingest_timestamp is NOT included here — it is added by Lambda
-    at the moment the event is received, so it reflects the real ingestion time.
-    """
+    """Build a raw event record matching the TFG data model."""
     return {
         'event_id': str(uuid.uuid4()),
         'subject_id': subject_id,

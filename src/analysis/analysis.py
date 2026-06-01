@@ -26,14 +26,14 @@ Output (a la carpeta results_<scenario>/):
     fig6_cdf.png             — CDF de pipeline_latency_ms per repetició amb threshold SLO
 
 Mètriques de latència:
-    pipeline_latency_ms = processed_timestamp − ingest_timestamp
-    Ambdós timestamps generats dins d'AWS Lambda (mateix domini temporal).
-    Mesura el temps de processament de la capa serverless: decode, validació i enriquiment.
-    El temps de permanència a Kinesis no queda capturat i es documenta com a limitació coneguda.
+    kinesis_to_lambda_ms  = processing_start_ts − kinesis_arrival_ts
+    processing_latency_ms = processing_end_ts   − processing_start_ts
+    pipeline_latency_ms   = processing_end_ts   − kinesis_arrival_ts   ← SLO principal
 
-    ingest_latency_ms i processing_latency_ms han estat eliminades:
-    - ingest_latency_ms: diferència cross-machine (local vs AWS), offset ~74ms, valors negatius.
-    - processing_latency_ms: redundant amb pipeline_latency_ms (mateix càlcul).
+    T0 kinesis_arrival_ts : approximateArrivalTimestamp de Kinesis (domini AWS).
+    T1 processing_start_ts: time.time() a l'inici del processament a Lambda.
+    T2 processing_end_ts  : time.time() just abans del put_item a DynamoDB.
+    L'escriptura a DynamoDB (~5-20 ms) queda exclosa i es documenta com a limitació coneguda.
 """
 
 import boto3
@@ -121,9 +121,9 @@ def query_dynamodb():
     items = [dec_to_float(item) for item in items]
     df = pd.DataFrame(items)
 
-    # Numeric coercion — only pipeline_latency_ms is used as latency metric
-    for col in ['pipeline_latency_ms',
-                'sensor_timestamp', 'ingest_timestamp', 'processed_timestamp']:
+    # Numeric coercion — latency metrics and timestamps
+    for col in ['pipeline_latency_ms', 'kinesis_to_lambda_ms', 'processing_latency_ms',
+                'sensor_timestamp', 'kinesis_arrival_ts', 'processing_start_ts', 'processing_end_ts']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -143,16 +143,17 @@ def query_dynamodb():
 
 def compute_latency_metrics(df):
     """
-    Per-run percentile statistics for pipeline_latency_ms.
-    pipeline_latency_ms = processed_timestamp - ingest_timestamp (both within AWS).
-    ingest_latency_ms and processing_latency_ms have been removed:
-    - ingest_latency_ms: cross-machine clock offset (~74ms), produced negative values.
-    - processing_latency_ms: identical calculation to pipeline_latency_ms, redundant.
+    Per-run percentile statistics for pipeline_latency_ms, kinesis_to_lambda_ms
+    and processing_latency_ms.
+    pipeline_latency_ms   = processing_end_ts - kinesis_arrival_ts  (SLO principal)
+    kinesis_to_lambda_ms  = processing_start_ts - kinesis_arrival_ts
+    processing_latency_ms = processing_end_ts - processing_start_ts
+    Tots els timestamps dins del domini temporal d'AWS (clock skew eliminat).
     """
     logger.info("Computing latency metrics...")
 
     group_cols   = ['scenario', 'run_id'] if 'run_id' in df.columns else ['scenario']
-    latency_cols = ['pipeline_latency_ms']
+    latency_cols = ['pipeline_latency_ms', 'kinesis_to_lambda_ms', 'processing_latency_ms']
 
     records = []
     for group_keys, group_df in df.groupby(group_cols):
@@ -399,7 +400,7 @@ SCENARIO_LABELS = {
 def fig1_boxplot(df, scenario, output_dir):
     """
     Boxplot of pipeline_latency_ms with SLO threshold line.
-    Sole latency metric: processed_timestamp - ingest_timestamp (within AWS).
+    pipeline_latency_ms = processing_end_ts - kinesis_arrival_ts (within AWS).
     """
     logger.info("Generating Figure 1 — Boxplot pipeline_latency_ms...")
 
@@ -423,7 +424,7 @@ def fig1_boxplot(df, scenario, output_dir):
                linewidth=1.5, label=f'SLO P95 < {threshold // 1000}s')
     ax.legend(fontsize=9)
 
-    ax.set_title('pipeline_latency_ms\n(processament Lambda, SLO)', fontsize=11)
+    ax.set_title('pipeline_latency_ms\n(Kinesis → fi processament Lambda, SLO)', fontsize=11)
     ax.set_xticks([1])
     ax.set_xticklabels([SCENARIO_LABELS[scenario]], fontsize=9)
     ax.set_ylabel('Latència (ms)', fontsize=9)
