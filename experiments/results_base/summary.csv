@@ -1,4 +1,4 @@
-scenario,run_id,n_records,pipeline_latency_ms_p50,pipeline_latency_ms_p95,pipeline_latency_ms_p99,pipeline_latency_ms_mean,processing_latency_ms_p50,processing_latency_ms_p95,processing_latency_ms_p99,processing_latency_ms_mean
-base,1,2400,671,1051,2399,653,0,0,0,0
-base,2,2400,703,982,1828,657,0,0,0,0
-base,3,2398,718,999,1796,673,0,0,0,0
+scenario,run_id,n_records,pipeline_latency_ms_p50,pipeline_latency_ms_p95,pipeline_latency_ms_p99,pipeline_latency_ms_mean,kinesis_to_lambda_ms_p50,kinesis_to_lambda_ms_p95,kinesis_to_lambda_ms_p99,kinesis_to_lambda_ms_mean,processing_latency_ms_p50,processing_latency_ms_p95,processing_latency_ms_p99,processing_latency_ms_mean
+base,1,2400,608,1058,2009,682,608,1058,2009,682,0,0,0,0
+base,2,2400,596,878,1085,546,596,878,1085,546,0,0,0,0
+base,3,2400,635,925,1869,603,635,925,1869,603,0,0,0,0

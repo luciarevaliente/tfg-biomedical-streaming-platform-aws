@@ -34,6 +34,8 @@ Mètriques de latència:
     T1 processing_start_ts: time.time() a l'inici del processament a Lambda.
     T2 processing_end_ts  : time.time() just abans del put_item a DynamoDB.
     L'escriptura a DynamoDB (~5-20 ms) queda exclosa i es documenta com a limitació coneguda.
+    El tram Generador → Kinesis no és mesurable per desincronisme entre el rellotge
+    local i el rellotge AWS (~74ms offset detectat).
 """
 
 import boto3
@@ -211,7 +213,6 @@ def compute_reproducibility(metrics_df):
         .reset_index()
     )
 
-    # 95% CI assuming t-distribution with n-1 df; for n=3 t=4.303
     from scipy import stats as _stats
     def ci95(row):
         n = row['n_runs']
@@ -307,8 +308,6 @@ def compute_slo_report(metrics_df, integrity_df, scenario):
     SLO compliance table.
     - base/sustained: P95 pipeline_latency_ms < 10.000ms AND loss < 1%
     - peak: zero loss AND recovery < 60s (P95 < 30.000ms is observational only)
-    The recovery time must be supplied externally (measured from CloudWatch
-    GetRecords.IteratorAgeMilliseconds after the burst ends).
     """
     logger.info("Evaluating SLO compliance...")
 
@@ -701,6 +700,24 @@ def export_results(metrics_df, slo_df, integrity_df, throughput_df,
         for _, row in metrics_df.iterrows():
             print(f"  {row['scenario']:12s}  "
                   f"P95 = {int(row['pipeline_latency_ms_p95']):>8,} ms")
+
+    print("\n── LATÈNCIA kinesis_to_lambda_ms ──")
+    if 'run_id' in metrics_df.columns:
+        for _, row in metrics_df.iterrows():
+            if 'kinesis_to_lambda_ms_p50' in row:
+                print(f"  {row['scenario']:12s}  run {int(row['run_id'])}  "
+                      f"P50={int(row['kinesis_to_lambda_ms_p50']):>7,} ms  "
+                      f"P95={int(row['kinesis_to_lambda_ms_p95']):>7,} ms  "
+                      f"P99={int(row['kinesis_to_lambda_ms_p99']):>7,} ms")
+
+    print("\n── LATÈNCIA processing_latency_ms ──")
+    if 'run_id' in metrics_df.columns:
+        for _, row in metrics_df.iterrows():
+            if 'processing_latency_ms_p50' in row:
+                print(f"  {row['scenario']:12s}  run {int(row['run_id'])}  "
+                      f"P50={int(row['processing_latency_ms_p50']):>7,} ms  "
+                      f"P95={int(row['processing_latency_ms_p95']):>7,} ms  "
+                      f"P99={int(row['processing_latency_ms_p99']):>7,} ms")
 
     if not reproducibility_df.empty:
         print("\n── REPRODUCTIBILITAT (variabilitat entre repeticions) ──")
