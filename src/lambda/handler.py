@@ -6,7 +6,7 @@ import boto3
 import logging
 from decimal import Decimal
 
- # Compress-Archive -Path handler.py -DestinationPath handler.zip -Force
+# Compress-Archive -Path handler.py -DestinationPath handler.zip -Force
 
 # Configure logging
 logger = logging.getLogger()
@@ -55,12 +55,12 @@ def lambda_handler(event, context):
     # Process each event
     for record in records:
         try:
-            # T0: timestamp generado por Kinesis cuando recibió el evento.
-            # Mismo dominio temporal que time.time() en Lambda (Unix epoch, segundos),
-            # libre de skew entre máquinas.
+            # T0: timestamp generat per Kinesis quan va rebre l'event.
+            # Pertany al domini temporal d'AWS (Unix epoch, segons),
+            # igual que time.time() a Lambda → la resta és lliure de clock skew.
             kinesis_arrival_ts = record['kinesis']['approximateArrivalTimestamp']
 
-            # T1: Lambda empieza a procesar este evento
+            # T1: Lambda comença a processar aquest event concret
             ingest_timestamp = time.time()
 
             # Decode event from Kinesis
@@ -73,23 +73,15 @@ def lambda_handler(event, context):
             # Validate required fields
             validate_event(event_data)
 
-            # T2: validación y enriquecimiento completados
+            # T2: validació i enriquiment completats
             processed_timestamp = time.time()
 
-            # Métricas de latencia — calculadas antes de construir el record
-            # para que queden persistidas en DynamoDB.
-            #
-            # kinesis_to_lambda_ms: tiempo que el evento estuvo en el buffer
-            # de Kinesis antes de que Lambda empezara a procesarlo.
-            kinesis_to_lambda_ms  = round((ingest_timestamp    - kinesis_arrival_ts) * 1000, 3)
-            # processing_latency_ms: tiempo interno de Lambda (decode + validate).
-            processing_latency_ms = round((processed_timestamp - ingest_timestamp)   * 1000, 3)
-            # pipeline_latency_ms: end-to-end dentro de AWS. Métrica SLO principal.
-            # Limitación conocida: el tramo Generador → Kinesis no está incluido
-            # por desincronismo entre el reloj local y el reloj AWS.
-            pipeline_latency_ms   = round((processed_timestamp - kinesis_arrival_ts) * 1000, 3)
+            # Métriques de latència
+            kinesis_to_lambda_ms  = int((ingest_timestamp    - kinesis_arrival_ts) * 1000)
+            processing_latency_ms = int((processed_timestamp - ingest_timestamp)   * 1000)
+            pipeline_latency_ms   = int((processed_timestamp - kinesis_arrival_ts) * 1000)
 
-            # Build processed record — convert floats to Decimal for DynamoDB
+            # Build processed record
             processed_record = float_to_decimal({
                 **event_data,
                 'subject_id_sensor_type': f"{event_data['subject_id']}#{event_data['sensor_type']}",
