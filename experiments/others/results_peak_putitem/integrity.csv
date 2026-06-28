@@ -1,0 +1,2 @@
+scenario,expected_events,stored_events,loss_rate_pct,slo_met
+peak,265329,261416,1.475,False

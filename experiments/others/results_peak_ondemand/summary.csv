@@ -1,0 +1,4 @@
+scenario,run_id,n_records,pipeline_latency_ms_p50,pipeline_latency_ms_p95,pipeline_latency_ms_p99,pipeline_latency_ms_mean,kinesis_to_lambda_ms_p50,kinesis_to_lambda_ms_p95,kinesis_to_lambda_ms_p99,kinesis_to_lambda_ms_mean,processing_latency_ms_p50,processing_latency_ms_p95,processing_latency_ms_p99,processing_latency_ms_mean
+peak,1,79649,44908,82985,86568,43796,44908,82985,86568,43796,0,0,0,0
+peak,2,82764,68649,111396,117457,67632,68649,111396,117457,67632,0,0,0,0
+peak,3,78406,95889,135859,142693,94178,95889,135859,142693,94178,0,0,0,0

@@ -1,0 +1,2 @@
+scenario,p50_pipeline_ms,p95_pipeline_ms,threshold_ms,criterion,slo_latency_met,loss_rate_pct,slo_integrity_met,slo_met
+peak,853237,2924061,30000,Pèrdua = 0% AND recuperació < 60s (P95 < 30.000ms observacional),False,1.475,False,False

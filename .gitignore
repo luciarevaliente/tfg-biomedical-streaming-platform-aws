@@ -11,4 +11,3 @@ __pycache__/
 *.pyc
 
 src/data-generator/sent_events_*.json
-experiments/
