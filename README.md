@@ -1,4 +1,4 @@
-# Serverless Biomedical Streaming Platform on AWS
+# Serverless architecture for near-real-time processing of wearable biomedical data in non-critical hospital areas
 
 Final Degree Project (TFG) — Data Engineering, Escola d'Enginyeria, Universitat Autònoma de Barcelona (UAB)  
 **Author:** Lucía Revaliente Torres · `lucia.revaliente@autonoma.cat`  
